@@ -1,4 +1,4 @@
-I'll help create a secure and optimized Factory.sol contract for ClaudeChain. Let's break down the development process and key considerations.
+I'll help develop the Factory.sol contract with a focus on security, gas optimization, and best practices. I'll walk through the development process and explain key decisions.
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -12,7 +12,7 @@ import "@openzeppelin/contracts/proxy/Clones.sol";
 /**
  * @title ClaudeChain Pool Factory
  * @dev Factory contract for deploying new liquidity pools
- * @notice This contract manages the deployment and tracking of all pools in the ClaudeChain ecosystem
+ * @notice This contract manages the creation and tracking of pools on ClaudeChain
  */
 contract Factory is Ownable, Pausable, ReentrancyGuard {
     // Events
@@ -34,97 +34,92 @@ contract Factory is Ownable, Pausable, ReentrancyGuard {
     error PoolCreationFailed();
 
     /**
-     * @dev Constructor initializes the factory with default implementations
-     * @param _standardPoolImpl Address of the standard pool implementation
-     * @param _aiPoolImpl Address of the AI-enhanced pool implementation
+     * @dev Constructor to initialize the factory
+     * @param _owner Address of the contract owner
      */
-    constructor(address _standardPoolImpl, address _aiPoolImpl) {
-        require(_standardPoolImpl != address(0) && _aiPoolImpl != address(0), "Invalid implementation");
-        poolImplementations[STANDARD_POOL] = _standardPoolImpl;
-        poolImplementations[AI_ENHANCED_POOL] = _aiPoolImpl;
+    constructor(address _owner) {
+        _transferOwnership(_owner);
     }
 
     /**
-     * @dev Creates a new pool
-     * @param poolType Type of pool to create (1 = Standard, 2 = AI-Enhanced)
-     * @param salt Unique salt for deterministic address generation
+     * @dev Sets the implementation contract for a pool type
+     * @param _implementation Address of the implementation contract
+     * @param _poolType Type of pool (1 = Standard, 2 = AI-Enhanced)
+     */
+    function setImplementation(address _implementation, uint256 _poolType) 
+        external 
+        onlyOwner 
+    {
+        if(_implementation == address(0)) revert InvalidImplementationAddress();
+        if(_poolType != STANDARD_POOL && _poolType != AI_ENHANCED_POOL) revert InvalidPoolType();
+        
+        poolImplementations[_poolType] = _implementation;
+        emit ImplementationUpdated(_implementation, _poolType);
+    }
+
+    /**
+     * @dev Creates a new pool using minimal proxy pattern
+     * @param _poolType Type of pool to create
+     * @param _salt Unique salt for deterministic address generation
      * @return pool Address of the newly created pool
      */
-    function createPool(
-        uint256 poolType,
-        bytes32 salt
-    ) external whenNotPaused nonReentrant returns (address pool) {
-        // Validate pool type
-        if (poolType != STANDARD_POOL && poolType != AI_ENHANCED_POOL) {
-            revert InvalidPoolType();
-        }
+    function createPool(uint256 _poolType, bytes32 _salt)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (address pool)
+    {
+        address implementation = poolImplementations[_poolType];
+        if(implementation == address(0)) revert InvalidPoolType();
 
-        address implementation = poolImplementations[poolType];
-        if (implementation == address(0)) {
-            revert InvalidImplementationAddress();
-        }
+        // Deploy new pool using minimal proxy pattern
+        pool = Clones.cloneDeterministic(implementation, _salt);
+        if(pool == address(0)) revert PoolCreationFailed();
 
-        // Create pool using minimal proxy pattern
-        pool = Clones.cloneDeterministic(implementation, salt);
-        if (pool == address(0)) {
-            revert PoolCreationFailed();
-        }
+        // Initialize pool (assuming initialize function exists)
+        (bool success,) = pool.call(
+            abi.encodeWithSignature("initialize(address)", msg.sender)
+        );
+        if(!success) revert PoolCreationFailed();
 
-        // Initialize pool state tracking
+        // Update state
         isPoolCreatedByFactory[pool] = true;
         allPools.push(pool);
 
-        // Initialize the pool (assuming IPool interface)
-        // IPool(pool).initialize(msg.sender);
-
-        emit PoolCreated(pool, msg.sender, poolType);
-    }
-
-    /**
-     * @dev Updates the implementation address for a pool type
-     * @param poolType Type of pool to update
-     * @param newImplementation New implementation address
-     */
-    function updateImplementation(
-        uint256 poolType,
-        address newImplementation
-    ) external onlyOwner {
-        if (poolType != STANDARD_POOL && poolType != AI_ENHANCED_POOL) {
-            revert InvalidPoolType();
-        }
-        if (newImplementation == address(0)) {
-            revert InvalidImplementationAddress();
-        }
-
-        poolImplementations[poolType] = newImplementation;
-        emit ImplementationUpdated(newImplementation, poolType);
-    }
-
-    /**
-     * @dev Returns the number of pools created
-     */
-    function getPoolCount() external view returns (uint256) {
-        return allPools.length;
+        emit PoolCreated(pool, msg.sender, _poolType);
     }
 
     /**
      * @dev Predicts the address where a pool will be deployed
-     * @param salt The salt to be used in address generation
-     * @param poolType Type of pool
+     * @param _poolType Type of pool
+     * @param _salt Unique salt
+     * @return predictedAddress The address where the pool would be deployed
      */
-    function predictPoolAddress(
-        bytes32 salt,
-        uint256 poolType
-    ) external view returns (address) {
-        return Clones.predictDeterministicAddress(
-            poolImplementations[poolType],
-            salt,
+    function predictPoolAddress(uint256 _poolType, bytes32 _salt)
+        external
+        view
+        returns (address predictedAddress)
+    {
+        address implementation = poolImplementations[_poolType];
+        if(implementation == address(0)) revert InvalidPoolType();
+
+        predictedAddress = Clones.predictDeterministicAddress(
+            implementation,
+            _salt,
             address(this)
         );
     }
 
     /**
-     * @dev Emergency pause for all pool creation
+     * @dev Returns all pools created by the factory
+     * @return Array of pool addresses
+     */
+    function getAllPools() external view returns (address[] memory) {
+        return allPools;
+    }
+
+    /**
+     * @dev Emergency pause pool creation
      */
     function pause() external onlyOwner {
         _pause();
@@ -142,46 +137,49 @@ contract Factory is Ownable, Pausable, ReentrancyGuard {
 Key Development Decisions and Features:
 
 1. Security Features:
-- Implemented OpenZeppelin's Ownable, Pausable, and ReentrancyGuard
-- Input validation for all critical parameters
-- Emergency pause functionality
-- Custom error messages for better gas efficiency
-- Implementation address validation
+- Used OpenZeppelin's battle-tested contracts for core functionality
+- Implemented ReentrancyGuard for createPool function
+- Added Pausable mechanism for emergency stops
+- Strict access control using Ownable
+- Custom error messages for better error handling
+- Input validation for critical parameters
 
 2. Gas Optimization:
 - Used minimal proxy pattern (EIP-1167) via OpenZeppelin's Clones library
-- Custom errors instead of require statements
-- Efficient storage layout
-- Deterministic address generation for pools
+- Implemented deterministic address generation
+- Used custom errors instead of require statements
+- Efficient state variable packing
 
-3. Flexibility:
-- Support for multiple pool types (Standard and AI-Enhanced)
-- Upgradeable pool implementations
-- Predictable address generation
+3. Flexibility and Upgradeability:
+- Support for different pool types (Standard and AI-Enhanced)
+- Ability to update implementations for each pool type
+- Deterministic address prediction for pools
 
 4. Tracking and Verification:
-- Complete pool tracking system
-- Factory verification for created pools
-- Event emission for important state changes
+- Maintains list of all created pools
+- Verification mechanism for factory-created pools
+- Comprehensive event emission for important actions
 
 5. Error Handling:
-- Custom error types for specific failure cases
-- Comprehensive input validation
-- Clear error messages
+- Custom errors for specific failure cases
+- Validation of all critical inputs
+- Checks for contract deployment success
 
 Usage Example:
 ```solidity
 // Deploy factory
-Factory factory = new Factory(standardPoolImpl, aiPoolImpl);
+Factory factory = new Factory(owner);
+
+// Set implementations
+factory.setImplementation(standardPoolImpl, 1);
+factory.setImplementation(aiEnhancedPoolImpl, 2);
 
 // Create new pool
-bytes32 salt = keccak256(abi.encodePacked(block.timestamp, msg.sender));
-address newPool = factory.createPool(Factory.STANDARD_POOL, salt);
+bytes32 salt = bytes32(uint256(1));
+address newPool = factory.createPool(1, salt);
 
-// Predict pool address
-address predictedAddress = factory.predictPoolAddress(salt, Factory.STANDARD_POOL);
+// Verify pool
+bool isValid = factory.isPoolCreatedByFactory(newPool);
 ```
 
-This implementation provides a secure and gas-efficient way to deploy and manage pools in the ClaudeChain ecosystem. The factory pattern allows for standardized pool deployment while maintaining upgradeability and security.
-
-Would you like me to explain any particular aspect in more detail or discuss additional features that could be added?
+This implementation provides a secure and gas-efficient way to deploy and manage pools on ClaudeChain. The code follows best practices and includes comprehensive documentation for maintainability.
