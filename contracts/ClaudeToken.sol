@@ -1,4 +1,14 @@
-I'll help create the ClaudeToken smart contract with a focus on security, efficiency, and best practices. Let me walk you through the development process.
+I'll help develop the ClaudeToken smart contract with a focus on security, efficiency, and best practices. Let's break down the development process:
+
+1. First, I'll outline the key features and requirements:
+- ERC-20 compliance
+- Safe mathematical operations
+- Access control
+- Pause functionality for emergencies
+- Burning mechanism
+- Events for transparency
+
+2. Here's the production-ready code with detailed comments:
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -12,130 +22,73 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title ClaudeToken
- * @dev Implementation of the ClaudeToken for ClaudeChain
- * 
- * Features:
- * - ERC20 standard compliance
- * - Burning capability
- * - Pausable transfers
- * - Role-based access control
- * - Anti-flash loan protection
- * - Transfer rate limiting
+ * @dev Implementation of the ClaudeToken, an enhanced ERC20 token for ClaudeChain
+ * @custom:security-contact security@claudechain.io
  */
 contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, ReentrancyGuard {
-    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
-    
-    // Transfer rate limiting
-    mapping(address => uint256) public lastTransferTimestamp;
-    uint256 public constant TRANSFER_COOLDOWN = 1 minutes;
-    uint256 public constant MAX_TRANSFER_AMOUNT = 1000000 * 10**18; // 1M tokens
-    
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+
+    // Maximum supply cap
+    uint256 public constant MAX_SUPPLY = 1_000_000_000 * 10**18; // 1 billion tokens
+
     // Events
-    event RateLimit(address indexed from, uint256 amount, uint256 timestamp);
     event MinterAdded(address indexed account);
     event MinterRemoved(address indexed account);
+    event TokensMinted(address indexed to, uint256 amount);
 
     /**
-     * @dev Constructor that gives msg.sender all of the default admin roles
+     * @dev Constructor that gives msg.sender all existing tokens.
+     * @param initialSupply The initial supply of tokens to mint
      */
-    constructor() ERC20("ClaudeToken", "CLAUDE") {
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(PAUSER_ROLE, msg.sender);
-        _grantRole(MINTER_ROLE, msg.sender);
+    constructor(uint256 initialSupply) ERC20("ClaudeToken", "CLAUDE") {
+        require(initialSupply <= MAX_SUPPLY, "Initial supply exceeds max supply");
         
-        // Initial supply minted to deployer
-        _mint(msg.sender, 100000000 * 10**decimals()); // 100M initial supply
+        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _setupRole(MINTER_ROLE, msg.sender);
+        _setupRole(PAUSER_ROLE, msg.sender);
+
+        _mint(msg.sender, initialSupply);
     }
 
     /**
-     * @dev Pauses all token transfers
+     * @dev Creates `amount` new tokens for `to`.
      * Requirements:
-     * - Caller must have PAUSER_ROLE
+     * - the caller must have the `MINTER_ROLE`
+     */
+    function mint(address to, uint256 amount) 
+        public 
+        onlyRole(MINTER_ROLE) 
+        whenNotPaused 
+        nonReentrant 
+    {
+        require(totalSupply() + amount <= MAX_SUPPLY, "Would exceed max supply");
+        require(to != address(0), "Cannot mint to zero address");
+        
+        _mint(to, amount);
+        emit TokensMinted(to, amount);
+    }
+
+    /**
+     * @dev Pauses all token transfers.
+     * Requirements:
+     * - the caller must have the `PAUSER_ROLE`
      */
     function pause() public onlyRole(PAUSER_ROLE) {
         _pause();
     }
 
     /**
-     * @dev Unpauses all token transfers
+     * @dev Unpauses all token transfers.
      * Requirements:
-     * - Caller must have PAUSER_ROLE
+     * - the caller must have the `PAUSER_ROLE`
      */
     function unpause() public onlyRole(PAUSER_ROLE) {
         _unpause();
     }
 
     /**
-     * @dev Mints new tokens
-     * Requirements:
-     * - Caller must have MINTER_ROLE
-     * @param to Address to receive the tokens
-     * @param amount Amount of tokens to mint
-     */
-    function mint(address to, uint256 amount) public onlyRole(MINTER_ROLE) {
-        require(to != address(0), "Cannot mint to zero address");
-        require(amount > 0, "Amount must be positive");
-        _mint(to, amount);
-    }
-
-    /**
-     * @dev Checks transfer rate limits and cooldown
-     * @param from Address sending tokens
-     * @param amount Amount of tokens being transferred
-     */
-    function _checkTransferLimits(address from, uint256 amount) internal {
-        if (hasRole(DEFAULT_ADMIN_ROLE, from)) {
-            return; // Admins bypass limits
-        }
-
-        require(amount <= MAX_TRANSFER_AMOUNT, "Transfer amount exceeds limit");
-        require(
-            block.timestamp >= lastTransferTimestamp[from] + TRANSFER_COOLDOWN,
-            "Transfer cooldown active"
-        );
-        
-        lastTransferTimestamp[from] = block.timestamp;
-        emit RateLimit(from, amount, block.timestamp);
-    }
-
-    /**
-     * @dev Override of the transfer function to add rate limiting
-     * @param to Address to transfer to
-     * @param amount Amount to transfer
-     */
-    function transfer(address to, uint256 amount) 
-        public 
-        virtual 
-        override 
-        whenNotPaused 
-        nonReentrant 
-        returns (bool) 
-    {
-        _checkTransferLimits(_msgSender(), amount);
-        return super.transfer(to, amount);
-    }
-
-    /**
-     * @dev Override of the transferFrom function to add rate limiting
-     * @param from Address to transfer from
-     * @param to Address to transfer to
-     * @param amount Amount to transfer
-     */
-    function transferFrom(address from, address to, uint256 amount)
-        public
-        virtual
-        override
-        whenNotPaused
-        nonReentrant
-        returns (bool)
-    {
-        _checkTransferLimits(from, amount);
-        return super.transferFrom(from, to, amount);
-    }
-
-    /**
-     * @dev Hook that is called before any transfer of tokens
+     * @dev Hook that is called before any transfer of tokens.
      */
     function _beforeTokenTransfer(
         address from,
@@ -143,48 +96,78 @@ contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, Reentranc
         uint256 amount
     ) internal virtual override whenNotPaused {
         super._beforeTokenTransfer(from, to, amount);
+        
+        require(to != address(this), "Cannot transfer to token contract");
+    }
+
+    /**
+     * @dev Returns the number of decimal places used by the token
+     */
+    function decimals() public pure override returns (uint8) {
+        return 18;
+    }
+
+    /**
+     * @dev Required override for multiple inheritance
+     */
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(AccessControl)
+        returns (bool)
+    {
+        return super.supportsInterface(interfaceId);
     }
 }
 ```
 
-Key Design Decisions and Security Features:
+Key security and design decisions:
 
 1. **Inheritance Structure**:
-- Used OpenZeppelin's battle-tested contracts as base
-- Implemented ERC20, Burnable, Pausable, AccessControl, and ReentrancyGuard
+- Used OpenZeppelin's battle-tested contracts
+- Implemented multiple security features through inheritance
+- Added ReentrancyGuard for additional protection
 
-2. **Security Measures**:
-- Role-based access control for administrative functions
-- ReentrancyGuard to prevent reentrancy attacks
-- Pausable functionality for emergency situations
-- Rate limiting to prevent market manipulation
-- Transfer amount caps
+2. **Access Control**:
+- Role-based access control for minting and pausing
+- Separate roles for different administrative functions
+- Clear permission hierarchy
 
-3. **Gas Optimization**:
-- Efficient use of storage variables
+3. **Safety Mechanisms**:
+- Maximum supply cap to prevent infinite minting
+- Pause functionality for emergency situations
+- Checks for zero addresses
+- ReentrancyGuard for mint function
+
+4. **Gas Optimization**:
+- Efficient use of storage
 - Minimal state changes
-- Optimized access control checks
+- Optimized function modifiers
 
-4. **Error Handling**:
+5. **Error Handling**:
 - Comprehensive require statements
 - Clear error messages
 - Event emissions for important state changes
 
-5. **Additional Features**:
-- Transfer rate limiting with cooldown periods
-- Maximum transfer amounts
-- Admin bypass for rate limits
-- Detailed events for tracking
-
 To deploy this contract:
-1. Ensure you have OpenZeppelin contracts installed
-2. Deploy with initial parameters
-3. Grant necessary roles to administrative addresses
 
-Future enhancements could include:
-- Snapshot functionality
-- Governance integration
-- Deflationary mechanisms
-- Enhanced analytics events
+1. Install dependencies:
+```bash
+npm install @openzeppelin/contracts
+```
 
-Would you like me to explain any particular aspect in more detail?
+2. Deploy with constructor parameters:
+```javascript
+const initialSupply = ethers.utils.parseEther("100000000"); // 100M tokens
+const claudeToken = await ClaudeToken.deploy(initialSupply);
+```
+
+3. Verify the contract on Etherscan with:
+```javascript
+await hre.run("verify:verify", {
+  address: claudeToken.address,
+  constructorArguments: [initialSupply],
+});
+```
+
+This implementation provides a solid foundation for ClaudeChain's token economy while maintaining high security standards and following best practices.
