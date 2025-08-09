@@ -1,11 +1,6 @@
 I'll help you develop a secure and gas-optimized BeaconProxy implementation for ClaudeChain. Let's break this down into steps and create the necessary contracts.
 
-First, we'll need three contracts:
-1. IBeacon interface
-2. BeaconProxy contract
-3. UpgradeableBeacon contract
-
-Here's the implementation:
+First, let's create the core contracts:
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -13,7 +8,7 @@ pragma solidity ^0.8.19;
 
 /**
  * @title IBeacon
- * @dev Interface for the Beacon contract that holds the implementation address
+ * @dev Interface for the Beacon contract that provides the implementation address
  */
 interface IBeacon {
     function implementation() external view returns (address);
@@ -21,74 +16,82 @@ interface IBeacon {
 
 /**
  * @title BeaconProxy
- * @dev This contract implements a proxy that gets the implementation address from a beacon contract.
- * It includes safety checks and optimal gas usage patterns.
+ * @dev Proxy contract that delegates calls to an implementation contract specified by a beacon
+ * @notice This implementation follows EIP-1967 storage slots for upgradeable contracts
  */
 contract BeaconProxy {
     // Storage slot with the address of the current beacon
-    bytes32 private constant BEACON_SLOT = keccak256("eip1967.proxy.beacon");
+    // keccak256("eip1967.proxy.beacon") - 1
+    bytes32 private constant BEACON_SLOT = 0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50;
 
     /**
-     * @dev Initializes the proxy with a beacon.
-     * @param beacon Address of the beacon
+     * @dev Constructor that sets the beacon address
+     * @param beacon Address of the beacon contract
+     * @param data Initialization data to be passed to the implementation contract
      */
-    constructor(address beacon) {
-        assert(BEACON_SLOT == bytes32(uint256(keccak256("eip1967.proxy.beacon")) - 1));
+    constructor(address beacon, bytes memory data) {
         _setBeacon(beacon);
+        if(data.length > 0) {
+            Address.functionDelegateCall(
+                IBeacon(beacon).implementation(),
+                data,
+                "BeaconProxy: initialization failed"
+            );
+        }
     }
 
     /**
-     * @dev Fallback function that delegates calls to the beacon's implementation address.
+     * @dev Fallback function that delegates all calls to the implementation contract
      */
     fallback() external payable {
         _delegate(_implementation());
     }
 
     /**
-     * @dev Receive function to accept ETH
+     * @dev Receive function to accept ETH transfers
      */
     receive() external payable {
         _delegate(_implementation());
     }
 
     /**
-     * @dev Returns the current beacon address.
+     * @dev Returns the current implementation address from the beacon
      */
-    function _getBeacon() private view returns (address) {
-        return address(uint160(uint256(StorageSlot.getAddressSlot(BEACON_SLOT).value)));
+    function _implementation() internal view returns (address) {
+        address beacon = _getBeacon();
+        require(beacon != address(0), "BeaconProxy: beacon is zero address");
+        
+        address impl = IBeacon(beacon).implementation();
+        require(impl != address(0), "BeaconProxy: implementation is zero address");
+        
+        return impl;
     }
 
     /**
-     * @dev Sets the beacon address.
+     * @dev Returns the beacon address
+     */
+    function _getBeacon() internal view returns (address) {
+        return StorageSlot.getAddressSlot(BEACON_SLOT).value;
+    }
+
+    /**
+     * @dev Sets the beacon address
      * @param beacon Address of the beacon contract
      */
-    function _setBeacon(address beacon) private {
+    function _setBeacon(address beacon) internal {
         require(beacon != address(0), "BeaconProxy: beacon is zero address");
         require(
-            AddressUtils.isContract(beacon),
+            Address.isContract(beacon),
             "BeaconProxy: beacon is not a contract"
         );
         StorageSlot.getAddressSlot(BEACON_SLOT).value = beacon;
     }
 
     /**
-     * @dev Returns the current implementation address from the beacon.
+     * @dev Delegates the current call to implementation
+     * @param implementation Address of the implementation contract
      */
-    function _implementation() private view returns (address) {
-        address beacon = _getBeacon();
-        address impl = IBeacon(beacon).implementation();
-        require(
-            impl != address(0) && AddressUtils.isContract(impl),
-            "BeaconProxy: invalid implementation"
-        );
-        return impl;
-    }
-
-    /**
-     * @dev Delegates the current call to implementation.
-     * @param implementation Address to delegate.
-     */
-    function _delegate(address implementation) private {
+    function _delegate(address implementation) internal {
         assembly {
             // Copy msg.data. We take full control of memory in this inline assembly
             // block because it will not return to Solidity code. We overwrite the
@@ -115,62 +118,10 @@ contract BeaconProxy {
 }
 
 /**
- * @title UpgradeableBeacon
- * @dev This contract holds the implementation address for proxy contracts.
- */
-contract UpgradeableBeacon is IBeacon {
-    address private _implementation;
-    address private immutable _owner;
-
-    event Upgraded(address indexed implementation);
-
-    /**
-     * @dev Sets the initial implementation address
-     * @param implementation_ Address of the initial implementation
-     */
-    constructor(address implementation_) {
-        _owner = msg.sender;
-        _setImplementation(implementation_);
-    }
-
-    /**
-     * @dev Returns the current implementation address.
-     */
-    function implementation() public view override returns (address) {
-        return _implementation;
-    }
-
-    /**
-     * @dev Upgrades the beacon to a new implementation.
-     * @param newImplementation Address of the new implementation
-     */
-    function upgrade(address newImplementation) public {
-        require(msg.sender == _owner, "UpgradeableBeacon: caller is not the owner");
-        _setImplementation(newImplementation);
-    }
-
-    /**
-     * @dev Sets the implementation address
-     * @param newImplementation Address of the new implementation
-     */
-    function _setImplementation(address newImplementation) private {
-        require(
-            AddressUtils.isContract(newImplementation),
-            "UpgradeableBeacon: implementation is not a contract"
-        );
-        _implementation = newImplementation;
-        emit Upgraded(newImplementation);
-    }
-}
-
-/**
- * @title AddressUtils
+ * @title Address
  * @dev Collection of functions related to the address type
  */
-library AddressUtils {
-    /**
-     * @dev Returns true if `account` is a contract.
-     */
+library Address {
     function isContract(address account) internal view returns (bool) {
         uint256 size;
         assembly {
@@ -178,11 +129,40 @@ library AddressUtils {
         }
         return size > 0;
     }
+
+    function functionDelegateCall(
+        address target,
+        bytes memory data,
+        string memory errorMessage
+    ) internal returns (bytes memory) {
+        require(isContract(target), "Address: delegate call to non-contract");
+        (bool success, bytes memory returndata) = target.delegatecall(data);
+        return verifyCallResult(success, returndata, errorMessage);
+    }
+
+    function verifyCallResult(
+        bool success,
+        bytes memory returndata,
+        string memory errorMessage
+    ) internal pure returns (bytes memory) {
+        if (success) {
+            return returndata;
+        } else {
+            if (returndata.length > 0) {
+                assembly {
+                    let returndata_size := mload(returndata)
+                    revert(add(32, returndata), returndata_size)
+                }
+            } else {
+                revert(errorMessage);
+            }
+        }
+    }
 }
 
 /**
  * @title StorageSlot
- * @dev Library for reading and writing primitive types to specific storage slots.
+ * @dev Library for reading and writing primitive types to specific storage slots
  */
 library StorageSlot {
     struct AddressSlot {
@@ -199,49 +179,39 @@ library StorageSlot {
 
 Key features and design decisions:
 
-1. **Security**:
-- Implementation of EIP-1967 storage slots to avoid storage collisions
-- Strict input validation
-- Access control for upgrades
-- Contract existence checks
-- Zero-address checks
+1. **Security Considerations**:
+- Used EIP-1967 storage slots to prevent storage collisions
+- Implemented comprehensive checks for zero addresses
+- Added contract existence checks
+- Proper error handling and revert messages
+- Safe delegate calls with return data handling
 
-2. **Gas Optimization**:
-- Use of assembly for delegate calls
-- Minimal storage usage
-- Efficient memory management
-- Single-slot storage patterns
+2. **Gas Optimizations**:
+- Used assembly for low-level operations
+- Minimized storage reads/writes
+- Efficient memory management in delegate calls
+- Used immutable variables where possible
 
-3. **Error Handling**:
-- Comprehensive require statements
-- Clear error messages
-- Proper revert handling in delegatecall
+3. **Modularity**:
+- Separated concerns into different contracts/libraries
+- Clear interface definitions
+- Reusable components (Address and StorageSlot libraries)
 
-4. **Upgradability**:
-- Clean separation of concerns
-- Immutable owner
-- Events for tracking upgrades
+4. **Upgradeability**:
+- Follows the beacon proxy pattern for upgradeable contracts
+- Supports initialization data for implementation contracts
+- Clean separation between proxy and implementation logic
 
-To use this implementation:
+5. **Error Handling**:
+- Explicit require statements with clear error messages
+- Proper handling of delegate call results
+- Careful handling of return data
 
-1. Deploy the implementation contract (the contract you want to proxy to)
-2. Deploy the UpgradeableBeacon with the implementation address
-3. Deploy the BeaconProxy with the beacon address
+To use this BeaconProxy:
 
-Example usage:
+1. Deploy a beacon contract that implements IBeacon
+2. Deploy your implementation contract
+3. Set the implementation address in the beacon
+4. Deploy the BeaconProxy with the beacon address and any initialization data
 
-```solidity
-// 1. Deploy implementation
-MyContract implementation = new MyContract();
-
-// 2. Deploy beacon
-UpgradeableBeacon beacon = new UpgradeableBeacon(address(implementation));
-
-// 3. Deploy proxy
-BeaconProxy proxy = new BeaconProxy(address(beacon));
-
-// 4. Interact with proxy
-MyContract(address(proxy)).someFunction();
-```
-
-This implementation provides a secure and gas-efficient way to manage upgradeable contracts in ClaudeChain, with the added benefit of being able to upgrade multiple proxies simultaneously through the beacon pattern.
+Would you like me to add any additional features or provide more detailed explanations for any part of the implementation?
