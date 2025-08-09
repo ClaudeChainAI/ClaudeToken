@@ -1,4 +1,4 @@
-I'll help create a secure and gas-optimized staking contract for ClaudeChain. Let's break down the development process and key considerations.
+I'll help create a secure and optimized staking contract for ClaudeChain. Let's break down the development process and key considerations.
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -12,42 +12,42 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 /**
  * @title ClaudeChain Staking Contract
  * @dev Implements staking functionality with 1% daily rewards
- * @notice This contract handles the staking mechanics for ClaudeChain
+ * @notice Allows users to stake tokens and earn daily rewards
  */
 contract ClaudeChainStaking is ReentrancyGuard, Pausable, Ownable {
     // State variables
     IERC20 public immutable stakingToken;
     
     // Constants
-    uint256 public constant DAILY_REWARD_RATE = 1000; // 1% = 1000 basis points
-    uint256 public constant BASIS_POINTS = 100000; // 100% = 100000
+    uint256 public constant DAILY_REWARD_RATE = 100; // 1% = 100 basis points
+    uint256 public constant BASIS_POINTS = 10000;
     uint256 public constant MINIMUM_STAKE_AMOUNT = 100 * 10**18; // 100 tokens minimum
     uint256 public constant REWARD_INTERVAL = 1 days;
 
-    // Staker info struct
-    struct Stake {
+    // Structs
+    struct StakeInfo {
         uint256 amount;
         uint256 startTime;
         uint256 lastClaimTime;
-        bool isActive;
+        uint256 unclaimedRewards;
     }
 
     // Mappings
-    mapping(address => Stake) public stakes;
+    mapping(address => StakeInfo) public stakes;
     
     // Events
     event Staked(address indexed user, uint256 amount);
     event Unstaked(address indexed user, uint256 amount);
     event RewardsClaimed(address indexed user, uint256 amount);
 
-    // Custom errors
+    // Errors
     error InsufficientStakeAmount();
-    error NoActiveStake();
-    error StakingPeriodNotMet();
+    error NoStakeFound();
+    error NoRewardsAvailable();
     error TransferFailed();
 
     /**
-     * @dev Constructor to set the staking token address
+     * @dev Constructor to initialize the staking contract
      * @param _stakingToken Address of the ERC20 token used for staking
      */
     constructor(address _stakingToken) {
@@ -56,112 +56,106 @@ contract ClaudeChainStaking is ReentrancyGuard, Pausable, Ownable {
     }
 
     /**
-     * @dev Stakes tokens into the contract
-     * @param amount Amount of tokens to stake
+     * @dev Allows users to stake tokens
+     * @param _amount Amount of tokens to stake
      */
-    function stake(uint256 amount) external nonReentrant whenNotPaused {
-        if (amount < MINIMUM_STAKE_AMOUNT) revert InsufficientStakeAmount();
+    function stake(uint256 _amount) external nonReentrant whenNotPaused {
+        if (_amount < MINIMUM_STAKE_AMOUNT) revert InsufficientStakeAmount();
 
-        Stake storage userStake = stakes[msg.sender];
+        StakeInfo storage userStake = stakes[msg.sender];
         
-        // If user has existing stake, claim rewards first
-        if (userStake.isActive) {
+        // If user has existing stake, claim pending rewards first
+        if (userStake.amount > 0) {
             _claimRewards();
         }
 
-        // Transfer tokens to contract
-        bool success = stakingToken.transferFrom(msg.sender, address(this), amount);
-        if (!success) revert TransferFailed();
-
-        // Update stake info
-        if (!userStake.isActive) {
-            userStake.startTime = block.timestamp;
-            userStake.isActive = true;
-        }
-        userStake.amount += amount;
+        // Update stake information
+        userStake.amount += _amount;
+        userStake.startTime = block.timestamp;
         userStake.lastClaimTime = block.timestamp;
 
-        emit Staked(msg.sender, amount);
+        // Transfer tokens to contract
+        bool success = stakingToken.transferFrom(msg.sender, address(this), _amount);
+        if (!success) revert TransferFailed();
+
+        emit Staked(msg.sender, _amount);
     }
 
     /**
      * @dev Calculates pending rewards for a user
-     * @param user Address of the user
+     * @param _user Address of the user
      * @return Pending reward amount
      */
-    function calculateRewards(address user) public view returns (uint256) {
-        Stake memory userStake = stakes[user];
+    function calculatePendingRewards(address _user) public view returns (uint256) {
+        StakeInfo storage userStake = stakes[_user];
         
-        if (!userStake.isActive) return 0;
+        if (userStake.amount == 0) return 0;
 
         uint256 timeElapsed = block.timestamp - userStake.lastClaimTime;
         uint256 periods = timeElapsed / REWARD_INTERVAL;
         
         uint256 rewards = (userStake.amount * DAILY_REWARD_RATE * periods) / BASIS_POINTS;
-        
-        return rewards;
+        return rewards + userStake.unclaimedRewards;
     }
 
     /**
-     * @dev Claims pending rewards
+     * @dev Allows users to claim their staking rewards
      */
     function claimRewards() external nonReentrant whenNotPaused {
         _claimRewards();
     }
 
     /**
-     * @dev Internal function to process rewards
+     * @dev Internal function to process rewards claiming
      */
     function _claimRewards() internal {
-        Stake storage userStake = stakes[msg.sender];
+        StakeInfo storage userStake = stakes[msg.sender];
         
-        if (!userStake.isActive) revert NoActiveStake();
+        if (userStake.amount == 0) revert NoStakeFound();
+        
+        uint256 rewards = calculatePendingRewards(msg.sender);
+        if (rewards == 0) revert NoRewardsAvailable();
 
-        uint256 rewards = calculateRewards(msg.sender);
-        if (rewards > 0) {
-            userStake.lastClaimTime = block.timestamp;
-            bool success = stakingToken.transfer(msg.sender, rewards);
-            if (!success) revert TransferFailed();
-            
-            emit RewardsClaimed(msg.sender, rewards);
-        }
+        userStake.lastClaimTime = block.timestamp;
+        userStake.unclaimedRewards = 0;
+
+        bool success = stakingToken.transfer(msg.sender, rewards);
+        if (!success) revert TransferFailed();
+
+        emit RewardsClaimed(msg.sender, rewards);
     }
 
     /**
-     * @dev Unstakes tokens and claims pending rewards
-     * @param amount Amount to unstake
+     * @dev Allows users to unstake their tokens
+     * @param _amount Amount of tokens to unstake
      */
-    function unstake(uint256 amount) external nonReentrant whenNotPaused {
-        Stake storage userStake = stakes[msg.sender];
+    function unstake(uint256 _amount) external nonReentrant whenNotPaused {
+        StakeInfo storage userStake = stakes[msg.sender];
         
-        if (!userStake.isActive) revert NoActiveStake();
-        if (amount > userStake.amount) revert InsufficientStakeAmount();
+        if (userStake.amount < _amount) revert InsufficientStakeAmount();
 
         // Claim any pending rewards first
         _claimRewards();
 
         // Update stake amount
-        userStake.amount -= amount;
-        if (userStake.amount == 0) {
-            userStake.isActive = false;
-        }
+        userStake.amount -= _amount;
 
         // Transfer tokens back to user
-        bool success = stakingToken.transfer(msg.sender, amount);
+        bool success = stakingToken.transfer(msg.sender, _amount);
         if (!success) revert TransferFailed();
 
-        emit Unstaked(msg.sender, amount);
+        emit Unstaked(msg.sender, _amount);
     }
 
     /**
-     * @dev Emergency function to pause contract
+     * @dev Emergency function to pause the contract
      */
     function pause() external onlyOwner {
         _pause();
     }
 
     /**
-     * @dev Function to unpause contract
+     * @dev Function to unpause the contract
      */
     function unpause() external onlyOwner {
         _unpause();
@@ -172,44 +166,40 @@ contract ClaudeChainStaking is ReentrancyGuard, Pausable, Ownable {
 Key Development Decisions and Security Considerations:
 
 1. Security Features:
-- Used OpenZeppelin's ReentrancyGuard to prevent reentrancy attacks
-- Implemented Pausable functionality for emergency situations
-- Added access control using Ownable
-- Used custom errors for gas efficiency and better error handling
+- Implemented ReentrancyGuard to prevent reentrancy attacks
+- Added Pausable functionality for emergency situations
+- Used OpenZeppelin's battle-tested contracts
 - Implemented checks-effects-interactions pattern
+- Added custom error messages for better gas efficiency
 
 2. Gas Optimization:
-- Used custom errors instead of require statements
-- Optimized state variable packing
 - Used immutable for stakingToken address
-- Implemented efficient reward calculation mechanism
+- Implemented custom errors instead of require statements
+- Minimized storage operations
+- Used efficient math operations
 
-3. Staking Mechanics:
-- 1% daily rewards implemented using basis points for precision
-- Minimum staking amount requirement
-- Automatic reward claiming when staking additional tokens
-- Flexible unstaking mechanism
+3. Reward Mechanism:
+- 1% daily rewards calculated using basis points (10000)
+- Rewards are calculated based on time periods elapsed
+- Automatic reward claiming before new stakes or unstaking
 
 4. Error Handling:
-- Comprehensive input validation
-- Token transfer success checking
-- Custom errors for specific failure cases
-- Safe math operations using Solidity 0.8.x
+- Comprehensive error checks for all critical operations
+- Custom error messages for better debugging
+- Validation of all input parameters
 
-5. Events:
+5. Events and Monitoring:
 - Emitted events for all important state changes
-- Indexed parameters for efficient filtering
+- Detailed event parameters for off-chain tracking
 
 To deploy this contract:
-1. Deploy the staking token first
-2. Deploy this contract with the staking token address
-3. Ensure the staking token has approved this contract as a spender
+1. Deploy with the address of your ERC20 token
+2. Ensure the ERC20 token has sufficient supply for rewards
+3. Test all functions thoroughly in a testnet first
+4. Consider having the contract audited before mainnet deployment
 
-Additional considerations:
-- Consider adding a timelock for unstaking
-- Add maximum stake limits if needed
-- Implement emergency withdrawal functionality
-- Add reward pool management
-- Consider vesting periods for rewards
-
-Let me know if you need any clarification or have specific requirements to adjust!
+The contract can be extended with additional features in future phases:
+- Multiple reward tiers
+- Governance functionality
+- Time-locked staking
+- Compound interest options
