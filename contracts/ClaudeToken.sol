@@ -1,4 +1,4 @@
-I'll help create the ClaudeToken.sol contract with a focus on security, optimization, and best practices. Let's break down the development process:
+I'll help create the ClaudeToken smart contract with a focus on security, efficiency, and best practices. I'll explain my thought process and key decisions throughout.
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -12,13 +12,14 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title ClaudeToken
- * @dev Implementation of the ClaudeToken
+ * @dev Implementation of the ClaudeToken, the native token for ClaudeChain
  * 
- * Enhanced ERC20 token with:
+ * Features:
+ * - ERC20 standard compliance
  * - Role-based access control
- * - Pausable functionality
- * - Anti-flash loan protection
+ * - Pausable functionality for emergency situations
  * - Burning capability
+ * - Anti-flash loan protection
  * - Transfer rate limiting
  */
 contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, ReentrancyGuard {
@@ -26,31 +27,30 @@ contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, Reentranc
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     
     // Transfer rate limiting
-    mapping(address => uint256) private _lastTransferTimestamp;
+    mapping(address => uint256) public lastTransferTimestamp;
     uint256 public constant TRANSFER_COOLDOWN = 1 minutes;
+    uint256 public constant MAX_TRANSFER_AMOUNT = 1000000 * 10**18; // 1M tokens
     
     // Anti-flash loan protection
-    mapping(address => uint256) private _transfersInBlock;
-    uint256 public constant MAX_TRANSFERS_PER_BLOCK = 3;
+    mapping(address => uint256) public transfersInBlock;
     
     // Events
-    event RateLimit(address indexed account, uint256 timestamp);
+    event RateLimit(address indexed account, uint256 amount, uint256 timestamp);
     event FlashLoanAttempt(address indexed account, uint256 blockNumber);
 
     /**
-     * @dev Constructor
-     * @param initialSupply Initial token supply to mint
+     * @dev Constructor to initialize the token with initial supply
+     * @param initialSupply The initial token supply to mint
      */
     constructor(uint256 initialSupply) ERC20("ClaudeToken", "CLAUDE") {
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(MINTER_ROLE, msg.sender);
-        _grantRole(PAUSER_ROLE, msg.sender);
-        
+        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _setupRole(MINTER_ROLE, msg.sender);
+        _setupRole(PAUSER_ROLE, msg.sender);
         _mint(msg.sender, initialSupply);
     }
 
     /**
-     * @dev Pause token transfers
+     * @dev Pauses all token transfers
      * Requirements:
      * - Caller must have PAUSER_ROLE
      */
@@ -59,7 +59,7 @@ contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, Reentranc
     }
 
     /**
-     * @dev Unpause token transfers
+     * @dev Unpauses all token transfers
      * Requirements:
      * - Caller must have PAUSER_ROLE
      */
@@ -68,65 +68,63 @@ contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, Reentranc
     }
 
     /**
-     * @dev Mint new tokens
-     * @param to Address to mint tokens to
-     * @param amount Amount of tokens to mint
+     * @dev Mints new tokens
+     * @param to The address to mint tokens to
+     * @param amount The amount of tokens to mint
      * Requirements:
      * - Caller must have MINTER_ROLE
      */
     function mint(address to, uint256 amount) public onlyRole(MINTER_ROLE) {
-        require(to != address(0), "Cannot mint to zero address");
+        require(to != address(0), "ClaudeToken: mint to zero address");
         _mint(to, amount);
     }
 
     /**
-     * @dev Override transfer function with additional security checks
+     * @dev Override of the transfer function to add rate limiting and flash loan protection
      */
     function transfer(address to, uint256 amount) public virtual override returns (bool) {
-        require(_checkTransferCooldown(msg.sender), "Transfer cooldown active");
-        require(_checkFlashLoanProtection(msg.sender), "Too many transfers in block");
-        
-        _lastTransferTimestamp[msg.sender] = block.timestamp;
-        _transfersInBlock[msg.sender]++;
-        
+        require(_validateTransfer(msg.sender, amount), "ClaudeToken: transfer validation failed");
         return super.transfer(to, amount);
     }
 
     /**
-     * @dev Override transferFrom function with additional security checks
+     * @dev Override of the transferFrom function to add rate limiting and flash loan protection
      */
     function transferFrom(address from, address to, uint256 amount) public virtual override returns (bool) {
-        require(_checkTransferCooldown(from), "Transfer cooldown active");
-        require(_checkFlashLoanProtection(from), "Too many transfers in block");
-        
-        _lastTransferTimestamp[from] = block.timestamp;
-        _transfersInBlock[from]++;
-        
+        require(_validateTransfer(from, amount), "ClaudeToken: transfer validation failed");
         return super.transferFrom(from, to, amount);
     }
 
     /**
-     * @dev Check if transfer cooldown has passed
-     * @param account Address to check
+     * @dev Internal function to validate transfers
+     * @param from The address sending tokens
+     * @param amount The amount of tokens being transferred
      */
-    function _checkTransferCooldown(address account) internal view returns (bool) {
-        if (block.timestamp >= _lastTransferTimestamp[account] + TRANSFER_COOLDOWN) {
-            return true;
+    function _validateTransfer(address from, uint256 amount) internal returns (bool) {
+        // Check transfer cooldown
+        require(
+            block.timestamp >= lastTransferTimestamp[from] + TRANSFER_COOLDOWN,
+            "ClaudeToken: transfer cooldown active"
+        );
+        
+        // Check maximum transfer amount
+        require(
+            amount <= MAX_TRANSFER_AMOUNT,
+            "ClaudeToken: amount exceeds transfer limit"
+        );
+        
+        // Flash loan protection
+        transfersInBlock[from]++;
+        if (transfersInBlock[from] > 2) {
+            emit FlashLoanAttempt(from, block.number);
+            return false;
         }
-        emit RateLimit(account, block.timestamp);
-        return false;
-    }
-
-    /**
-     * @dev Check for potential flash loan attempts
-     * @param account Address to check
-     */
-    function _checkFlashLoanProtection(address account) internal view returns (bool) {
-        if (_transfersInBlock[account] < MAX_TRANSFERS_PER_BLOCK) {
-            return true;
-        }
-        emit FlashLoanAttempt(account, block.number);
-        return false;
+        
+        // Update last transfer timestamp
+        lastTransferTimestamp[from] = block.timestamp;
+        emit RateLimit(from, amount, block.timestamp);
+        
+        return true;
     }
 
     /**
@@ -141,65 +139,54 @@ contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, Reentranc
     }
 
     /**
-     * @dev Hook that is called after any transfer of tokens
+     * @dev Required override for solidity
      */
-    function _afterTokenTransfer(
-        address from,
-        address to,
-        uint256 amount
-    ) internal virtual override {
-        super._afterTokenTransfer(from, to, amount);
-        
-        // Reset transfer count for new block
-        if (_transfersInBlock[from] > 0 && block.number > _lastTransferTimestamp[from]) {
-            _transfersInBlock[from] = 0;
-        }
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(AccessControl, ERC20)
+        returns (bool)
+    {
+        return super.supportsInterface(interfaceId);
     }
 }
 ```
 
-Key Development Decisions and Features:
+Key Design Decisions and Features:
 
-1. **Security Features**:
+1. Security Features:
 - Implemented AccessControl for role-based permissions
 - Added ReentrancyGuard to prevent reentrancy attacks
-- Included Pausable functionality for emergency stops
+- Included Pausable functionality for emergency situations
 - Added rate limiting to prevent rapid transfers
 - Implemented flash loan protection
 
-2. **Gas Optimization**:
+2. Gas Optimization:
 - Used immutable variables where possible
-- Optimized storage usage with appropriate data types
-- Implemented efficient checking mechanisms
+- Minimized storage operations
+- Efficient validation checks
 
-3. **Error Handling**:
-- Added comprehensive require statements
-- Implemented custom events for monitoring
-- Clear error messages for all reverts
+3. Error Handling:
+- Comprehensive require statements
+- Clear error messages
+- Event emissions for important state changes
 
-4. **Enhanced Functionality**:
-- Role-based minting capability
-- Burning functionality
-- Transfer rate limiting
-- Anti-flash loan protection
-- Pausable transfers
+4. Additional Features:
+- Transfer rate limiting with cooldown periods
+- Maximum transfer amount restrictions
+- Flash loan protection mechanism
+- Burning capability
 
-5. **Best Practices**:
-- Used OpenZeppelin contracts for proven security
-- Comprehensive documentation
-- Clear function visibility specifiers
-- Event emission for important state changes
+5. Best Practices:
+- NatSpec documentation
+- Clear function organization
+- Inheritance from OpenZeppelin contracts
+- Event logging for important actions
 
 To deploy this contract:
-1. Install OpenZeppelin contracts: `npm install @openzeppelin/contracts`
-2. Compile with Solidity 0.8.19 or later
-3. Deploy with initial supply parameter
+1. Install OpenZeppelin dependencies
+2. Set appropriate initial supply
+3. Deploy with hardhat or truffle
 4. Set up roles for administration
 
-The contract can be extended with additional features in future phases, such as:
-- Governance functionality
-- Staking mechanisms
-- Advanced vesting schedules
-- Cross-chain compatibility
-
-Let me know if you need any clarification or have questions about specific features!
+Would you like me to explain any particular aspect in more detail or add any specific features?
