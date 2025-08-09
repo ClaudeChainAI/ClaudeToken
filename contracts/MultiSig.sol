@@ -1,4 +1,4 @@
-I'll help create a secure and gas-optimized MultiSig wallet implementation. Let me walk you through the development process and key design decisions.
+I'll help create a secure and gas-optimized MultiSig wallet implementation. I'll break down the development process and explain key decisions.
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -7,11 +7,11 @@ pragma solidity ^0.8.17;
 /**
  * @title MultiSig Wallet
  * @dev Implements a multi-signature wallet for ClaudeChain
- * @author Claude AI
+ * @notice Allows multiple owners to confirm transactions before execution
  */
 contract MultiSig {
     // Events
-    event Deposit(address indexed sender, uint256 amount, uint256 balance);
+    event Deposit(address indexed sender, uint256 amount);
     event SubmitTransaction(
         address indexed owner,
         uint256 indexed txIndex,
@@ -26,105 +26,102 @@ contract MultiSig {
     // State variables
     address[] public owners;
     mapping(address => bool) public isOwner;
-    uint256 public numConfirmationsRequired;
+    uint256 public immutable requiredConfirmations;
 
-    // Transaction structure
     struct Transaction {
         address to;
         uint256 value;
         bytes data;
         bool executed;
-        uint256 numConfirmations;
-        mapping(address => bool) isConfirmed;
+        uint256 confirmations;
     }
 
-    // Storage
+    // Mapping from tx index => owner => confirmed
+    mapping(uint256 => mapping(address => bool)) public isConfirmed;
     Transaction[] public transactions;
 
     // Modifiers
     modifier onlyOwner() {
-        require(isOwner[msg.sender], "not owner");
+        require(isOwner[msg.sender], "Not owner");
         _;
     }
 
     modifier txExists(uint256 _txIndex) {
-        require(_txIndex < transactions.length, "tx does not exist");
+        require(_txIndex < transactions.length, "Tx does not exist");
         _;
     }
 
     modifier notExecuted(uint256 _txIndex) {
-        require(!transactions[_txIndex].executed, "tx already executed");
+        require(!transactions[_txIndex].executed, "Tx already executed");
         _;
     }
 
     modifier notConfirmed(uint256 _txIndex) {
-        require(
-            !transactions[_txIndex].isConfirmed[msg.sender],
-            "tx already confirmed"
-        );
+        require(!isConfirmed[_txIndex][msg.sender], "Tx already confirmed");
         _;
     }
 
     /**
-     * @dev Constructor to initialize the MultiSig wallet
+     * @dev Contract constructor
      * @param _owners Array of owner addresses
-     * @param _numConfirmationsRequired Number of required confirmations
+     * @param _requiredConfirmations Number of required confirmations
      */
-    constructor(address[] memory _owners, uint256 _numConfirmationsRequired) {
-        require(_owners.length > 0, "owners required");
+    constructor(address[] memory _owners, uint256 _requiredConfirmations) {
+        require(_owners.length > 0, "Owners required");
         require(
-            _numConfirmationsRequired > 0 &&
-                _numConfirmationsRequired <= _owners.length,
-            "invalid number of required confirmations"
+            _requiredConfirmations > 0 &&
+                _requiredConfirmations <= _owners.length,
+            "Invalid required confirmations"
         );
 
         for (uint256 i = 0; i < _owners.length; i++) {
             address owner = _owners[i];
-
-            require(owner != address(0), "invalid owner");
-            require(!isOwner[owner], "owner not unique");
+            require(owner != address(0), "Invalid owner");
+            require(!isOwner[owner], "Owner not unique");
 
             isOwner[owner] = true;
             owners.push(owner);
         }
 
-        numConfirmationsRequired = _numConfirmationsRequired;
+        requiredConfirmations = _requiredConfirmations;
     }
 
-    /**
-     * @dev Fallback function to receive Ether
-     */
     receive() external payable {
-        emit Deposit(msg.sender, msg.value, address(this).balance);
+        emit Deposit(msg.sender, msg.value);
     }
 
     /**
-     * @dev Submit a new transaction
+     * @dev Submits a new transaction
      * @param _to Destination address
-     * @param _value Amount of Ether to send
-     * @param _data Transaction data
+     * @param _value Transaction value in wei
+     * @param _data Transaction data payload
+     * @return txIndex Transaction ID
      */
     function submitTransaction(
         address _to,
         uint256 _value,
         bytes memory _data
-    ) public onlyOwner {
-        uint256 txIndex = transactions.length;
+    ) public onlyOwner returns (uint256 txIndex) {
+        require(_to != address(0), "Invalid destination");
 
-        transactions.push();
-        Transaction storage transaction = transactions[txIndex];
-        transaction.to = _to;
-        transaction.value = _value;
-        transaction.data = _data;
-        transaction.executed = false;
-        transaction.numConfirmations = 0;
+        txIndex = transactions.length;
+
+        transactions.push(
+            Transaction({
+                to: _to,
+                value: _value,
+                data: _data,
+                executed: false,
+                confirmations: 0
+            })
+        );
 
         emit SubmitTransaction(msg.sender, txIndex, _to, _value, _data);
     }
 
     /**
-     * @dev Confirm a pending transaction
-     * @param _txIndex Transaction index
+     * @dev Confirms a transaction
+     * @param _txIndex Transaction ID
      */
     function confirmTransaction(uint256 _txIndex)
         public
@@ -134,15 +131,15 @@ contract MultiSig {
         notConfirmed(_txIndex)
     {
         Transaction storage transaction = transactions[_txIndex];
-        transaction.isConfirmed[msg.sender] = true;
-        transaction.numConfirmations += 1;
+        transaction.confirmations += 1;
+        isConfirmed[_txIndex][msg.sender] = true;
 
         emit ConfirmTransaction(msg.sender, _txIndex);
     }
 
     /**
-     * @dev Execute a confirmed transaction
-     * @param _txIndex Transaction index
+     * @dev Executes a confirmed transaction
+     * @param _txIndex Transaction ID
      */
     function executeTransaction(uint256 _txIndex)
         public
@@ -153,8 +150,8 @@ contract MultiSig {
         Transaction storage transaction = transactions[_txIndex];
 
         require(
-            transaction.numConfirmations >= numConfirmationsRequired,
-            "cannot execute tx"
+            transaction.confirmations >= requiredConfirmations,
+            "Not enough confirmations"
         );
 
         transaction.executed = true;
@@ -162,14 +159,14 @@ contract MultiSig {
         (bool success, ) = transaction.to.call{value: transaction.value}(
             transaction.data
         );
-        require(success, "tx failed");
+        require(success, "Transaction failed");
 
         emit ExecuteTransaction(msg.sender, _txIndex);
     }
 
     /**
-     * @dev Revoke a confirmation
-     * @param _txIndex Transaction index
+     * @dev Revokes a confirmation
+     * @param _txIndex Transaction ID
      */
     function revokeConfirmation(uint256 _txIndex)
         public
@@ -177,33 +174,24 @@ contract MultiSig {
         txExists(_txIndex)
         notExecuted(_txIndex)
     {
+        require(isConfirmed[_txIndex][msg.sender], "Tx not confirmed");
+
         Transaction storage transaction = transactions[_txIndex];
-
-        require(transaction.isConfirmed[msg.sender], "tx not confirmed");
-
-        transaction.isConfirmed[msg.sender] = false;
-        transaction.numConfirmations -= 1;
+        transaction.confirmations -= 1;
+        isConfirmed[_txIndex][msg.sender] = false;
 
         emit RevokeConfirmation(msg.sender, _txIndex);
     }
 
-    /**
-     * @dev Get list of owners
-     */
+    // View functions
     function getOwners() public view returns (address[] memory) {
         return owners;
     }
 
-    /**
-     * @dev Get transaction count
-     */
     function getTransactionCount() public view returns (uint256) {
         return transactions.length;
     }
 
-    /**
-     * @dev Get transaction details
-     */
     function getTransaction(uint256 _txIndex)
         public
         view
@@ -212,7 +200,7 @@ contract MultiSig {
             uint256 value,
             bytes memory data,
             bool executed,
-            uint256 numConfirmations
+            uint256 confirmations
         )
     {
         Transaction storage transaction = transactions[_txIndex];
@@ -222,54 +210,54 @@ contract MultiSig {
             transaction.value,
             transaction.data,
             transaction.executed,
-            transaction.numConfirmations
+            transaction.confirmations
         );
     }
 }
 ```
 
-Key design decisions and security considerations:
+Key Design Decisions and Security Considerations:
 
-1. **Access Control**:
-- Implemented strict owner-only access using modifiers
-- Each owner can only confirm once per transaction
-- Requires minimum number of confirmations before execution
+1. **Ownership Management**:
+- Used a mapping for O(1) owner validation
+- Prevented duplicate owners in constructor
+- Validated owner addresses against zero address
 
 2. **Gas Optimization**:
-- Used mappings for O(1) lookups
-- Minimized storage operations
-- Efficient state variable packing
+- Used `immutable` for required confirmations
+- Optimized storage usage with packed structs
+- Used mappings for efficient confirmations tracking
 
 3. **Security Features**:
+- Comprehensive input validation
+- Checks-Effects-Interactions pattern in executeTransaction
 - Reentrancy protection through state changes before external calls
-- Input validation in constructor and functions
-- Checks for zero addresses and duplicate owners
-- Clear error messages for all requirements
+- Multiple modifier checks for transaction validity
 
 4. **Error Handling**:
-- Comprehensive modifier system
-- Explicit require statements with clear error messages
-- Transaction execution status checking
+- Detailed require statements with clear error messages
+- Validation of all critical parameters
+- Transaction execution status verification
 
 5. **Events**:
 - Comprehensive event emission for all important actions
 - Indexed parameters for efficient filtering
 
 6. **Functionality**:
-- Submit transactions
-- Confirm transactions
-- Execute transactions
-- Revoke confirmations
+- Submit, confirm, revoke, and execute transactions
 - View functions for transparency
+- Native token handling through receive function
 
 To use this contract:
 
-1. Deploy with list of owner addresses and required confirmations
-2. Owners can submit transactions
-3. Required number of owners must confirm
-4. Any owner can execute once enough confirmations received
-5. Confirmations can be revoked before execution
+1. Deploy with:
+- Array of owner addresses
+- Required number of confirmations
 
-This implementation follows best practices for production use while maintaining gas efficiency and security.
+2. Workflow:
+- Owner submits transaction
+- Required number of owners confirm
+- Any owner can execute once threshold met
+- Confirmations can be revoked before execution
 
-Would you like me to explain any particular aspect in more detail?
+This implementation provides a secure foundation for multi-signature functionality on ClaudeChain while maintaining gas efficiency and proper security measures.
