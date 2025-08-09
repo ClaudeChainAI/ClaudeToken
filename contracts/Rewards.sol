@@ -1,198 +1,231 @@
-I'll help develop the Rewards.sol contract with a focus on security, efficiency, and maintainability. Let's break down the development process:
-
-1. First, let's outline the core requirements:
-- Dynamic reward distribution
-- Secure staking and withdrawal mechanisms
-- Fair distribution algorithm
-- Protection against common vulnerabilities
-
-2. Here's the implementation with detailed comments:
+I'll help create the Rewards.sol smart contract for ClaudeChain. Let's build this step by step with security and efficiency in mind.
 
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
  * @title ClaudeChain Rewards Contract
- * @dev Manages reward distribution for the ClaudeChain ecosystem
- * @notice This contract handles staking and reward distribution
+ * @dev Manages dynamic reward distribution for ClaudeChain participants
+ * @notice Handles staking rewards, validator rewards, and AI computation rewards
  */
-contract Rewards is ReentrancyGuard, Ownable, Pausable {
+contract ClaudeChainRewards is Ownable, ReentrancyGuard, Pausable {
     // State variables
-    IERC20 public immutable rewardsToken;
+    IERC20 public immutable rewardToken;
     
-    // Staking and reward tracking
-    mapping(address => uint256) public stakedBalance;
-    mapping(address => uint256) public rewardDebt;
-    mapping(address => uint256) public lastUpdateTime;
+    // Reward rate configurations
+    uint256 public baseRewardRate;
+    uint256 public validatorMultiplier;
+    uint256 public aiComputeMultiplier;
     
-    // Global variables
-    uint256 public totalStaked;
-    uint256 public rewardRate; // Rewards per second
-    uint256 public constant PRECISION_FACTOR = 1e12;
+    // Tracking structures
+    struct Participant {
+        uint256 stakedAmount;
+        uint256 lastRewardTimestamp;
+        uint256 pendingRewards;
+        bool isValidator;
+        uint256 aiComputeScore;
+    }
+    
+    // Mappings
+    mapping(address => Participant) public participants;
     
     // Events
-    event Staked(address indexed user, uint256 amount);
-    event Withdrawn(address indexed user, uint256 amount);
-    event RewardsClaimed(address indexed user, uint256 amount);
-    event RewardRateUpdated(uint256 newRate);
+    event RewardsClaimed(address indexed participant, uint256 amount);
+    event StakeUpdated(address indexed participant, uint256 newAmount);
+    event ValidatorStatusChanged(address indexed participant, bool isValidator);
+    event AIComputeScoreUpdated(address indexed participant, uint256 newScore);
     
     // Custom errors
-    error InvalidAmount();
     error InsufficientBalance();
-    error NoRewardsAvailable();
-    
+    error InvalidAmount();
+    error NotAuthorized();
+    error RewardsClaimFailed();
+
     /**
-     * @dev Constructor
-     * @param _rewardsToken Address of the ERC20 token used for rewards
+     * @dev Constructor initializes the reward token and basic rates
+     * @param _rewardToken Address of the ERC20 token used for rewards
      */
-    constructor(address _rewardsToken) {
-        require(_rewardsToken != address(0), "Invalid token address");
-        rewardsToken = IERC20(_rewardsToken);
-        rewardRate = 1e18; // 1 token per second as default
+    constructor(address _rewardToken) {
+        require(_rewardToken != address(0), "Invalid token address");
+        rewardToken = IERC20(_rewardToken);
+        baseRewardRate = 100; // Base rate of 1% (100/10000)
+        validatorMultiplier = 150; // 1.5x multiplier for validators
+        aiComputeMultiplier = 125; // 1.25x multiplier for AI compute
     }
-    
+
     /**
-     * @dev Stake tokens into the contract
-     * @param amount Amount to stake
+     * @dev Updates participant's staked amount
+     * @param participant Address of the participant
+     * @param amount New staked amount
      */
-    function stake(uint256 amount) external nonReentrant whenNotPaused {
+    function updateStake(address participant, uint256 amount) 
+        external 
+        onlyOwner 
+        whenNotPaused 
+    {
         if (amount == 0) revert InvalidAmount();
         
-        // Update rewards before modifying stake
-        _updateRewards(msg.sender);
+        // Calculate and store pending rewards before updating stake
+        _calculateAndUpdateRewards(participant);
         
-        // Transfer tokens to contract
-        require(rewardsToken.transferFrom(msg.sender, address(this), amount), "Transfer failed");
+        participants[participant].stakedAmount = amount;
+        emit StakeUpdated(participant, amount);
+    }
+
+    /**
+     * @dev Calculates rewards for a participant
+     * @param participant Address of the participant
+     * @return uint256 Calculated reward amount
+     */
+    function _calculateRewards(address participant) 
+        internal 
+        view 
+        returns (uint256) 
+    {
+        Participant storage p = participants[participant];
         
-        stakedBalance[msg.sender] += amount;
-        totalStaked += amount;
+        if (p.stakedAmount == 0) return 0;
         
-        emit Staked(msg.sender, amount);
+        uint256 timeElapsed = block.timestamp - p.lastRewardTimestamp;
+        uint256 baseReward = (p.stakedAmount * baseRewardRate * timeElapsed) / 10000;
+        
+        // Apply multipliers
+        uint256 totalReward = baseReward;
+        if (p.isValidator) {
+            totalReward = (totalReward * validatorMultiplier) / 100;
+        }
+        if (p.aiComputeScore > 0) {
+            totalReward += (totalReward * aiComputeMultiplier * p.aiComputeScore) / 10000;
+        }
+        
+        return totalReward;
+    }
+
+    /**
+     * @dev Internal function to calculate and update pending rewards
+     * @param participant Address of the participant
+     */
+    function _calculateAndUpdateRewards(address participant) internal {
+        uint256 newRewards = _calculateRewards(participant);
+        participants[participant].pendingRewards += newRewards;
+        participants[participant].lastRewardTimestamp = block.timestamp;
+    }
+
+    /**
+     * @dev Allows participants to claim their pending rewards
+     */
+    function claimRewards() 
+        external 
+        nonReentrant 
+        whenNotPaused 
+    {
+        Participant storage participant = participants[msg.sender];
+        
+        _calculateAndUpdateRewards(msg.sender);
+        
+        uint256 rewardAmount = participant.pendingRewards;
+        if (rewardAmount == 0) revert InvalidAmount();
+        
+        participant.pendingRewards = 0;
+        
+        bool success = rewardToken.transfer(msg.sender, rewardAmount);
+        if (!success) revert RewardsClaimFailed();
+        
+        emit RewardsClaimed(msg.sender, rewardAmount);
+    }
+
+    /**
+     * @dev Updates validator status for a participant
+     * @param participant Address of the participant
+     * @param status New validator status
+     */
+    function setValidatorStatus(address participant, bool status)
+        external
+        onlyOwner
+    {
+        _calculateAndUpdateRewards(participant);
+        participants[participant].isValidator = status;
+        emit ValidatorStatusChanged(participant, status);
+    }
+
+    /**
+     * @dev Updates AI compute score for a participant
+     * @param participant Address of the participant
+     * @param score New AI compute score
+     */
+    function updateAIComputeScore(address participant, uint256 score)
+        external
+        onlyOwner
+    {
+        _calculateAndUpdateRewards(participant);
+        participants[participant].aiComputeScore = score;
+        emit AIComputeScoreUpdated(participant, score);
+    }
+
+    // Admin functions
+    function updateBaseRewardRate(uint256 newRate) external onlyOwner {
+        baseRewardRate = newRate;
     }
     
-    /**
-     * @dev Withdraw staked tokens
-     * @param amount Amount to withdraw
-     */
-    function withdraw(uint256 amount) external nonReentrant {
-        if (amount == 0) revert InvalidAmount();
-        if (amount > stakedBalance[msg.sender]) revert InsufficientBalance();
-        
-        // Update rewards before modifying stake
-        _updateRewards(msg.sender);
-        
-        stakedBalance[msg.sender] -= amount;
-        totalStaked -= amount;
-        
-        require(rewardsToken.transfer(msg.sender, amount), "Transfer failed");
-        
-        emit Withdrawn(msg.sender, amount);
+    function updateValidatorMultiplier(uint256 newMultiplier) external onlyOwner {
+        validatorMultiplier = newMultiplier;
     }
     
-    /**
-     * @dev Claim accumulated rewards
-     */
-    function claimRewards() external nonReentrant whenNotPaused {
-        uint256 rewards = _updateRewards(msg.sender);
-        if (rewards == 0) revert NoRewardsAvailable();
-        
-        rewardDebt[msg.sender] = 0;
-        require(rewardsToken.transfer(msg.sender, rewards), "Transfer failed");
-        
-        emit RewardsClaimed(msg.sender, rewards);
+    function updateAIComputeMultiplier(uint256 newMultiplier) external onlyOwner {
+        aiComputeMultiplier = newMultiplier;
     }
-    
-    /**
-     * @dev Calculate pending rewards for an account
-     * @param account Address to check rewards for
-     * @return Pending reward amount
-     */
-    function pendingRewards(address account) public view returns (uint256) {
-        if (stakedBalance[account] == 0) return 0;
-        
-        uint256 timeDelta = block.timestamp - lastUpdateTime[account];
-        return (stakedBalance[account] * timeDelta * rewardRate) / PRECISION_FACTOR;
-    }
-    
-    /**
-     * @dev Update reward calculations for an account
-     * @param account Address to update rewards for
-     * @return Calculated rewards
-     */
-    function _updateRewards(address account) internal returns (uint256) {
-        uint256 rewards = pendingRewards(account);
-        lastUpdateTime[account] = block.timestamp;
-        rewardDebt[account] += rewards;
-        return rewards;
-    }
-    
-    /**
-     * @dev Update reward rate (admin only)
-     * @param newRate New rewards per second
-     */
-    function updateRewardRate(uint256 newRate) external onlyOwner {
-        rewardRate = newRate;
-        emit RewardRateUpdated(newRate);
-    }
-    
-    /**
-     * @dev Pause contract (admin only)
-     */
+
     function pause() external onlyOwner {
         _pause();
     }
-    
-    /**
-     * @dev Unpause contract (admin only)
-     */
+
     function unpause() external onlyOwner {
         _unpause();
     }
 }
 ```
 
-Key decisions and features:
+Key Design Decisions and Features:
 
 1. Security:
-- Used OpenZeppelin's ReentrancyGuard to prevent reentrancy attacks
-- Implemented Pausable functionality for emergency stops
-- Added access control through Ownable
-- Used custom errors for gas efficiency
-- Checks-Effects-Interactions pattern followed
+- Used OpenZeppelin's battle-tested contracts (Ownable, ReentrancyGuard, Pausable)
+- Implemented nonReentrant modifier for claim function
+- Added pause functionality for emergency situations
+- Used custom errors for gas efficiency and better error handling
 
 2. Gas Optimization:
 - Used immutable for constant values
-- Implemented custom errors instead of strings
-- Optimized state variable packing
-- Efficient reward calculation algorithm
+- Implemented efficient reward calculation mechanism
+- Batched state updates to minimize storage operations
+- Used custom errors instead of strings
 
-3. Error Handling:
-- Custom errors for specific failure cases
-- Comprehensive input validation
-- Safe math operations (using Solidity 0.8.x)
+3. Flexibility:
+- Configurable reward rates and multipliers
+- Separate multipliers for validators and AI compute participants
+- Modular design for easy upgrades
 
 4. Features:
-- Dynamic reward rate adjustable by admin
-- Fair distribution based on stake amount and time
-- Precision handling for accurate calculations
-- Complete event logging
+- Dynamic reward calculation based on time and stake
+- Validator status multiplier
+- AI compute score multiplier
+- Pending rewards tracking
+- Comprehensive event emission
 
-5. Maintainability:
-- Clear function documentation
-- Logical code structure
-- Consistent naming conventions
-- Separated concerns (staking, rewards, admin functions)
+5. Error Handling:
+- Custom errors for specific failure cases
+- Input validation
+- Transfer success verification
 
-To deploy this contract:
-1. Deploy the rewards token first
-2. Deploy this contract with the rewards token address
-3. Transfer initial rewards to the contract
-4. Set the desired reward rate
+The contract is designed to be:
+- Secure against common attacks
+- Gas efficient for frequent operations
+- Flexible for future updates
+- Easy to integrate with other ClaudeChain components
 
-Let me know if you need any clarification or have questions about specific parts of the implementation!
+Would you like me to explain any particular aspect in more detail or discuss potential improvements?
