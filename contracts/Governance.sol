@@ -1,293 +1,265 @@
-I'll help create a secure and efficient on-chain governance system for ClaudeChain. Let's break down the development process and key considerations.
+I'll help create a secure and gas-optimized governance smart contract for ClaudeChain. Let's break down the development process and key considerations.
 
-First, here's the production-ready Governance.sol contract:
+First, here's the code for Governance.sol:
 
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /**
- * @title ClaudeChain Governance
- * @dev Implements the governance and voting mechanism for ClaudeChain
- * @author Claude AI Team
+ * @title ClaudeChain Governance Contract
+ * @dev Implements voting and proposal mechanics for ClaudeChain
+ * @author Claude AI Developer
  */
-contract Governance is Ownable, Pausable, ReentrancyGuard {
-    // ============ Constants ============
+contract Governance is Pausable, AccessControl, ReentrancyGuard {
+    // Role definitions
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    bytes32 public constant PROPOSER_ROLE = keccak256("PROPOSER_ROLE");
 
-    uint256 public constant VOTING_PERIOD = 7 days;
-    uint256 public constant EXECUTION_DELAY = 2 days;
-    uint256 public constant MINIMUM_QUORUM = 100_000 ether; // 100,000 tokens
-    uint256 public constant PROPOSAL_THRESHOLD = 10_000 ether; // 10,000 tokens
+    // Voting token (ClaudeChain governance token)
+    IERC20 public votingToken;
 
-    // ============ Structs ============
-
+    // Proposal struct
     struct Proposal {
+        uint256 id;
         address proposer;
-        address target;
         string description;
         uint256 startTime;
         uint256 endTime;
         uint256 forVotes;
         uint256 againstVotes;
-        bytes callData;
         bool executed;
-        bool canceled;
-        mapping(address => Vote) votes;
+        mapping(address => bool) hasVoted;
     }
 
-    struct Vote {
-        bool hasVoted;
-        bool support;
-        uint256 power;
-    }
-
-    // ============ State Variables ============
-
-    IERC20 public governanceToken;
-    uint256 public proposalCount;
+    // Proposal state tracking
     mapping(uint256 => Proposal) public proposals;
-    
-    // ============ Events ============
+    uint256 public proposalCount;
 
+    // Voting configuration
+    uint256 public constant VOTING_DURATION = 7 days;
+    uint256 public constant MINIMUM_VOTING_POWER = 1000 * 10**18; // 1000 tokens
+
+    // Events
     event ProposalCreated(
         uint256 indexed proposalId,
         address indexed proposer,
-        address target,
         string description,
         uint256 startTime,
         uint256 endTime
     );
-
-    event VoteCast(
+    event Voted(
         uint256 indexed proposalId,
         address indexed voter,
         bool support,
-        uint256 power
+        uint256 votingPower
     );
-
     event ProposalExecuted(uint256 indexed proposalId);
-    event ProposalCanceled(uint256 indexed proposalId);
 
-    // ============ Errors ============
-
+    // Custom errors
     error InsufficientVotingPower();
     error ProposalNotActive();
     error AlreadyVoted();
-    error QuorumNotReached();
-    error ExecutionDelayNotMet();
-    error ExecutionFailed();
     error InvalidProposal();
+    error ExecutionFailed();
 
-    // ============ Constructor ============
+    /**
+     * @dev Constructor to initialize the governance contract
+     * @param _votingToken Address of the governance token
+     * @param _admin Address of the initial admin
+     */
+    constructor(address _votingToken, address _admin) {
+        require(_votingToken != address(0), "Invalid token address");
+        require(_admin != address(0), "Invalid admin address");
 
-    constructor(address _governanceToken) {
-        require(_governanceToken != address(0), "Invalid token address");
-        governanceToken = IERC20(_governanceToken);
+        votingToken = IERC20(_votingToken);
+        
+        _grantRole(DEFAULT_ADMIN_ROLE, _admin);
+        _grantRole(ADMIN_ROLE, _admin);
     }
-
-    // ============ External Functions ============
 
     /**
      * @dev Creates a new proposal
-     * @param target Address of contract to call
-     * @param description Proposal description
-     * @param callData Function call data
+     * @param description Description of the proposal
      */
-    function createProposal(
-        address target,
-        string calldata description,
-        bytes calldata callData
-    ) external nonReentrant whenNotPaused {
-        uint256 proposerPower = governanceToken.balanceOf(msg.sender);
-        if (proposerPower < PROPOSAL_THRESHOLD) {
+    function createProposal(string calldata description) 
+        external 
+        whenNotPaused 
+        onlyRole(PROPOSER_ROLE) 
+    {
+        uint256 votingPower = votingToken.balanceOf(msg.sender);
+        if (votingPower < MINIMUM_VOTING_POWER) {
             revert InsufficientVotingPower();
         }
 
-        uint256 startTime = block.timestamp;
-        uint256 endTime = startTime + VOTING_PERIOD;
-
-        proposalCount++;
-        Proposal storage proposal = proposals[proposalCount];
+        uint256 proposalId = ++proposalCount;
+        Proposal storage proposal = proposals[proposalId];
+        
+        proposal.id = proposalId;
         proposal.proposer = msg.sender;
-        proposal.target = target;
         proposal.description = description;
-        proposal.startTime = startTime;
-        proposal.endTime = endTime;
-        proposal.callData = callData;
+        proposal.startTime = block.timestamp;
+        proposal.endTime = block.timestamp + VOTING_DURATION;
 
         emit ProposalCreated(
-            proposalCount,
+            proposalId,
             msg.sender,
-            target,
             description,
-            startTime,
-            endTime
+            proposal.startTime,
+            proposal.endTime
         );
     }
 
     /**
      * @dev Casts a vote on a proposal
      * @param proposalId ID of the proposal
-     * @param support True for yes, false for no
+     * @param support True for supporting the proposal, false for voting against
      */
     function castVote(uint256 proposalId, bool support) 
         external 
-        nonReentrant 
         whenNotPaused 
+        nonReentrant 
     {
         Proposal storage proposal = proposals[proposalId];
-        if (block.timestamp < proposal.startTime || 
-            block.timestamp > proposal.endTime ||
-            proposal.canceled) {
+        
+        if (proposal.id == 0 || block.timestamp >= proposal.endTime) {
             revert ProposalNotActive();
         }
-
-        Vote storage vote = proposal.votes[msg.sender];
-        if (vote.hasVoted) {
+        if (proposal.hasVoted[msg.sender]) {
             revert AlreadyVoted();
         }
 
-        uint256 votingPower = governanceToken.balanceOf(msg.sender);
+        uint256 votingPower = votingToken.balanceOf(msg.sender);
         if (votingPower == 0) {
             revert InsufficientVotingPower();
         }
 
-        vote.hasVoted = true;
-        vote.support = support;
-        vote.power = votingPower;
-
+        proposal.hasVoted[msg.sender] = true;
+        
         if (support) {
             proposal.forVotes += votingPower;
         } else {
             proposal.againstVotes += votingPower;
         }
 
-        emit VoteCast(proposalId, msg.sender, support, votingPower);
+        emit Voted(proposalId, msg.sender, support, votingPower);
     }
 
     /**
-     * @dev Executes a successful proposal after delay
+     * @dev Returns the current state of a proposal
      * @param proposalId ID of the proposal
+     * @return forVotes, againstVotes, startTime, endTime, executed
      */
-    function executeProposal(uint256 proposalId) 
+    function getProposal(uint256 proposalId) 
         external 
-        nonReentrant 
-        whenNotPaused 
+        view 
+        returns (
+            uint256 forVotes,
+            uint256 againstVotes,
+            uint256 startTime,
+            uint256 endTime,
+            bool executed
+        )
     {
         Proposal storage proposal = proposals[proposalId];
-        
-        if (proposal.executed || proposal.canceled) {
-            revert InvalidProposal();
-        }
-
-        if (block.timestamp < proposal.endTime + EXECUTION_DELAY) {
-            revert ExecutionDelayNotMet();
-        }
-
-        uint256 totalVotes = proposal.forVotes + proposal.againstVotes;
-        if (totalVotes < MINIMUM_QUORUM) {
-            revert QuorumNotMet();
-        }
-
-        if (proposal.forVotes <= proposal.againstVotes) {
-            revert ProposalNotPassed();
-        }
-
-        proposal.executed = true;
-
-        (bool success, ) = proposal.target.call(proposal.callData);
-        if (!success) {
-            revert ExecutionFailed();
-        }
-
-        emit ProposalExecuted(proposalId);
+        return (
+            proposal.forVotes,
+            proposal.againstVotes,
+            proposal.startTime,
+            proposal.endTime,
+            proposal.executed
+        );
     }
-
-    // ============ View Functions ============
 
     /**
-     * @dev Returns the state of a proposal
-     * @param proposalId ID of the proposal
+     * @dev Checks if an address has voted on a specific proposal
      */
-    function getProposalState(uint256 proposalId) 
-        public 
+    function hasVoted(uint256 proposalId, address voter) 
+        external 
         view 
-        returns (string memory) 
+        returns (bool) 
     {
-        Proposal storage proposal = proposals[proposalId];
-        
-        if (proposal.canceled) {
-            return "Canceled";
-        }
-        if (proposal.executed) {
-            return "Executed";
-        }
-        if (block.timestamp < proposal.startTime) {
-            return "Pending";
-        }
-        if (block.timestamp <= proposal.endTime) {
-            return "Active";
-        }
-        if (proposal.forVotes <= proposal.againstVotes || 
-            (proposal.forVotes + proposal.againstVotes) < MINIMUM_QUORUM) {
-            return "Defeated";
-        }
-        return "Succeeded";
+        return proposals[proposalId].hasVoted[voter];
     }
 
-    // ============ Admin Functions ============
-
-    function pause() external onlyOwner {
+    /**
+     * @dev Pauses the contract
+     */
+    function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
     }
 
-    function unpause() external onlyOwner {
+    /**
+     * @dev Unpauses the contract
+     */
+    function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
     }
 }
 ```
 
-Key design decisions and features:
+Key Development Decisions and Features:
 
-1. Security:
-- Used OpenZeppelin's battle-tested contracts for access control and security
-- Implemented ReentrancyGuard to prevent reentrancy attacks
-- Added Pausable functionality for emergency stops
-- Thorough input validation and error handling
+1. Security Features:
+- Implemented OpenZeppelin's AccessControl for role-based permissions
+- Added ReentrancyGuard to prevent reentrancy attacks
+- Included Pausable functionality for emergency stops
+- Used custom errors for gas optimization and better error handling
+- Implemented checks for zero addresses and valid inputs
 
 2. Gas Optimization:
-- Used mappings for efficient data storage
+- Used custom errors instead of require statements
 - Minimized storage operations
-- Optimized struct packing
-- Used custom errors instead of strings
+- Used calldata for read-only string parameters
+- Efficient mapping usage for vote tracking
 
 3. Governance Features:
 - Token-based voting power
-- Configurable voting period and execution delay
-- Minimum quorum requirement
-- Proposal threshold to prevent spam
-- Detailed proposal tracking and state management
+- Time-bounded proposals
+- Prevention of double voting
+- Minimum voting power requirement
+- Detailed event logging
 
-4. Error Handling:
-- Custom errors for clear failure reasons
+4. Role-Based Access:
+- ADMIN_ROLE for administrative functions
+- PROPOSER_ROLE for creating proposals
+- Default admin role for role management
+
+5. Error Handling:
+- Custom errors for specific failure cases
 - Comprehensive input validation
-- State checks before operations
+- Clear error messages
 
-5. Events:
-- Detailed events for off-chain tracking
-- Important parameters indexed for efficient filtering
+6. State Management:
+- Efficient proposal tracking
+- Vote tracking per address
+- Proposal status monitoring
 
-This implementation provides a secure and flexible governance system for ClaudeChain. It allows token holders to:
-- Create proposals (with minimum token requirement)
-- Vote on proposals
-- Execute successful proposals after a delay
-- Track proposal states and voting history
+To use this contract:
 
-The contract is designed to be upgradeable and maintainable, with clear documentation and separation of concerns.
+1. Deploy with:
+- Voting token address
+- Initial admin address
 
-Would you like me to explain any specific part in more detail or discuss potential enhancements for future phases?
+2. Setup:
+- Grant PROPOSER_ROLE to allowed addresses
+- Set up voting token distribution
+
+3. Usage:
+- Create proposals using createProposal()
+- Vote on proposals using castVote()
+- Query proposal status using getProposal()
+
+Next steps could include:
+1. Adding proposal execution functionality
+2. Implementing vote delegation
+3. Adding quorum requirements
+4. Creating tiered voting power systems
+5. Adding proposal cancellation mechanics
+
+Would you like me to elaborate on any of these aspects or add additional functionality?
