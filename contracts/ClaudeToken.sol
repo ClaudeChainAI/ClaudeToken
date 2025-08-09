@@ -1,6 +1,4 @@
-I'll help develop the ClaudeToken smart contract with a focus on security, efficiency, and best practices. Let's break this down step by step.
-
-First, here's the complete production-ready code for ClaudeToken.sol:
+I'll help create the ClaudeToken smart contract with a focus on security, efficiency, and best practices. Let's build this step by step.
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -14,8 +12,8 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title ClaudeToken
- * @dev Implementation of the ClaudeChain native token with enhanced security features
- * @author Claude AI Developer
+ * @dev Implementation of the ClaudeToken for ClaudeChain
+ * @custom:security-contact security@claudechain.io
  */
 contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, ReentrancyGuard {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
@@ -28,69 +26,56 @@ contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, Reentranc
     event MinterAdded(address indexed account);
     event MinterRemoved(address indexed account);
     event TokensMinted(address indexed to, uint256 amount);
-    event TokensBurned(address indexed from, uint256 amount);
-
+    
     /**
-     * @dev Constructor that gives msg.sender all existing tokens.
+     * @dev Contract constructor
+     * @notice Initializes the token with name, symbol, and initial supply
      */
     constructor() ERC20("ClaudeToken", "CLAUDE") {
-        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _setupRole(MINTER_ROLE, msg.sender);
-        _setupRole(PAUSER_ROLE, msg.sender);
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(MINTER_ROLE, msg.sender);
+        _grantRole(PAUSER_ROLE, msg.sender);
         
         // Mint initial supply to deployer
         _mint(msg.sender, INITIAL_SUPPLY);
     }
-
+    
     /**
-     * @dev Mints new tokens, respecting the max supply cap
+     * @dev Pauses all token transfers
+     * @notice Can only be called by accounts with PAUSER_ROLE
+     */
+    function pause() public onlyRole(PAUSER_ROLE) {
+        _pause();
+    }
+    
+    /**
+     * @dev Unpauses all token transfers
+     * @notice Can only be called by accounts with PAUSER_ROLE
+     */
+    function unpause() public onlyRole(PAUSER_ROLE) {
+        _unpause();
+    }
+    
+    /**
+     * @dev Mints new tokens
      * @param to The address that will receive the minted tokens
      * @param amount The amount of tokens to mint
+     * @notice Can only be called by accounts with MINTER_ROLE
      */
     function mint(address to, uint256 amount) 
-        external 
+        public 
         onlyRole(MINTER_ROLE) 
-        whenNotPaused 
         nonReentrant 
     {
-        require(to != address(0), "ClaudeToken: mint to zero address");
-        require(totalSupply() + amount <= MAX_SUPPLY, "ClaudeToken: max supply exceeded");
+        require(to != address(0), "Cannot mint to zero address");
+        require(totalSupply() + amount <= MAX_SUPPLY, "Would exceed max supply");
         
         _mint(to, amount);
         emit TokensMinted(to, amount);
     }
-
+    
     /**
-     * @dev Burns tokens, extending standard burn functionality
-     * @param amount The amount of tokens to burn
-     */
-    function burn(uint256 amount) 
-        public 
-        virtual 
-        override 
-        whenNotPaused 
-        nonReentrant 
-    {
-        super.burn(amount);
-        emit TokensBurned(_msgSender(), amount);
-    }
-
-    /**
-     * @dev Pauses all token transfers.
-     */
-    function pause() external onlyRole(PAUSER_ROLE) {
-        _pause();
-    }
-
-    /**
-     * @dev Unpauses all token transfers.
-     */
-    function unpause() external onlyRole(PAUSER_ROLE) {
-        _unpause();
-    }
-
-    /**
-     * @dev Hook that is called before any transfer of tokens.
+     * @dev Override of _beforeTokenTransfer to add pause functionality
      */
     function _beforeTokenTransfer(
         address from,
@@ -98,66 +83,78 @@ contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, Reentranc
         uint256 amount
     ) internal virtual override whenNotPaused {
         super._beforeTokenTransfer(from, to, amount);
-        require(to != address(this), "ClaudeToken: transfer to token contract");
     }
-
+    
     /**
      * @dev Returns the number of decimals used for token amounts
      */
-    function decimals() public pure override returns (uint8) {
+    function decimals() public view virtual override returns (uint8) {
         return 18;
+    }
+    
+    /**
+     * @dev Emergency token recovery function
+     * @param tokenAddress The address of the token to recover
+     * @notice Can only be called by admin role
+     */
+    function recoverERC20(address tokenAddress) 
+        external 
+        onlyRole(DEFAULT_ADMIN_ROLE) 
+        nonReentrant 
+    {
+        require(tokenAddress != address(this), "Cannot recover ClaudeToken");
+        IERC20 token = IERC20(tokenAddress);
+        uint256 balance = token.balanceOf(address(this));
+        require(balance > 0, "No tokens to recover");
+        require(
+            token.transfer(msg.sender, balance),
+            "Transfer failed"
+        );
     }
 }
 ```
 
-Key design decisions and security considerations:
+Key design decisions and features:
 
-1. **Inheritance Structure**:
-- Used OpenZeppelin's battle-tested contracts as base
-- Implemented ERC20, ERC20Burnable, Pausable, AccessControl, and ReentrancyGuard
-- This provides a solid foundation of security and functionality
-
-2. **Security Features**:
-- Role-based access control for administrative functions
-- Reentrancy protection on critical functions
+1. **Security Features**:
+- Using OpenZeppelin's battle-tested contracts as base
+- Implementation of AccessControl for role-based permissions
+- ReentrancyGuard to prevent reentrancy attacks
 - Pausable functionality for emergency situations
-- Checks for zero addresses and overflow protection
-- Maximum supply cap to prevent infinite minting
+- Careful validation of parameters
 
-3. **Gas Optimization**:
-- Used immutable variables where possible
-- Implemented efficient role-based access control
-- Minimal storage usage
+2. **Gas Optimization**:
+- Efficient use of require statements
+- Minimal storage operations
+- Use of constant values for fixed parameters
 - Optimized function visibility
 
-4. **Error Handling**:
-- Comprehensive require statements with clear error messages
-- Event emission for important state changes
-- Proper access control validation
+3. **Token Economics**:
+- Initial supply: 1 billion tokens
+- Maximum supply: 2 billion tokens
+- 18 decimals (standard for most ERC20 tokens)
 
-5. **Additional Features**:
-- Burning capability with events
-- Minting with max supply control
-- Pause/unpause functionality
-- Custom decimals specification
+4. **Role-Based Access**:
+- MINTER_ROLE for controlling token minting
+- PAUSER_ROLE for emergency pause functionality
+- DEFAULT_ADMIN_ROLE for overall administration
+
+5. **Safety Features**:
+- Emergency token recovery function
+- Pause mechanism for emergencies
+- Checks for zero addresses
+- Supply cap enforcement
 
 To deploy this contract:
-
-1. Install dependencies:
-```bash
-npm install @openzeppelin/contracts
-```
-
-2. Deploy with following parameters:
-- No constructor parameters needed
-- Initial supply: 1 billion tokens
-- Max supply: 2 billion tokens
+1. Install OpenZeppelin contracts: `npm install @openzeppelin/contracts`
+2. Compile with Solidity 0.8.19 or later
+3. Deploy with appropriate constructor parameters
 
 Testing considerations:
 1. Test all role-based functions
-2. Verify max supply limitations
+2. Verify max supply constraints
 3. Test pause/unpause functionality
-4. Verify burning mechanisms
-5. Check transfer restrictions
+4. Verify token recovery mechanism
+5. Test transfer scenarios
 
-Would you like me to provide additional implementation details or testing scenarios for any specific part of the contract?
+Would you like me to provide the test suite or explain any particular aspect in more detail?
