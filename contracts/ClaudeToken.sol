@@ -1,4 +1,4 @@
-I'll help create the ClaudeToken smart contract with a focus on security, optimization, and best practices. Let's break this down step by step.
+I'll help develop the ClaudeToken smart contract with a focus on security, efficiency, and best practices. Let's break this down into steps:
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -12,10 +12,11 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title ClaudeToken
- * @dev Implementation of the ClaudeToken for ClaudeChain
- * @custom:security-contact security@claudechain.io
+ * @dev Implementation of the ClaudeToken, an enhanced ERC20 token for ClaudeChain
+ * @author Claude AI Developer
  */
 contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, ReentrancyGuard {
+    // Role definitions
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
     
@@ -25,125 +26,130 @@ contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, Reentranc
     event TokensMinted(address indexed to, uint256 amount);
     event TokensBurned(address indexed from, uint256 amount);
 
-    // Constants
+    // State variables
     uint256 public constant INITIAL_SUPPLY = 1_000_000_000 * 10**18; // 1 billion tokens
     uint256 public constant MAX_SUPPLY = 2_000_000_000 * 10**18; // 2 billion tokens
-    
-    // State variables
     mapping(address => bool) public blacklisted;
-    uint256 private _totalBurned;
 
     /**
-     * @dev Constructor that gives msg.sender all of the default admin role.
+     * @dev Constructor initializes the token with initial supply and sets up roles
+     * @param _admin Address of the initial admin
      */
-    constructor() ERC20("ClaudeToken", "CLAUDE") {
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(MINTER_ROLE, msg.sender);
-        _grantRole(PAUSER_ROLE, msg.sender);
+    constructor(address _admin) ERC20("ClaudeToken", "CLAUDE") {
+        require(_admin != address(0), "Invalid admin address");
         
-        // Mint initial supply to deployer
-        _mint(msg.sender, INITIAL_SUPPLY);
+        _setupRole(DEFAULT_ADMIN_ROLE, _admin);
+        _setupRole(MINTER_ROLE, _admin);
+        _setupRole(PAUSER_ROLE, _admin);
+        
+        // Mint initial supply to admin
+        _mint(_admin, INITIAL_SUPPLY);
     }
 
     /**
      * @dev Modifier to check if an address is not blacklisted
      */
-    modifier notBlacklisted(address account) {
-        require(!blacklisted[account], "ClaudeToken: account is blacklisted");
+    modifier notBlacklisted(address _account) {
+        require(!blacklisted[_account], "Account is blacklisted");
         _;
     }
 
     /**
-     * @dev Pauses all token transfers.
-     * @notice Only addresses with PAUSER_ROLE can pause
-     */
-    function pause() public onlyRole(PAUSER_ROLE) {
-        _pause();
-    }
-
-    /**
-     * @dev Unpauses all token transfers.
-     * @notice Only addresses with PAUSER_ROLE can unpause
-     */
-    function unpause() public onlyRole(PAUSER_ROLE) {
-        _unpause();
-    }
-
-    /**
-     * @dev Mints new tokens
-     * @param to The address that will receive the minted tokens
-     * @param amount The amount of tokens to mint
+     * @dev Mints new tokens, respecting the max supply cap
+     * @param to Address to receive the minted tokens
+     * @param amount Amount of tokens to mint
      */
     function mint(address to, uint256 amount) 
-        public 
+        external 
         onlyRole(MINTER_ROLE) 
-        notBlacklisted(to) 
+        nonReentrant 
+        whenNotPaused 
     {
-        require(totalSupply() + amount <= MAX_SUPPLY, "ClaudeToken: would exceed max supply");
+        require(to != address(0), "Cannot mint to zero address");
+        require(totalSupply() + amount <= MAX_SUPPLY, "Would exceed max supply");
+        
         _mint(to, amount);
         emit TokensMinted(to, amount);
     }
 
     /**
-     * @dev Override of the _beforeTokenTransfer function to add transfer restrictions
+     * @dev Override of the ERC20 transfer function with blacklist check
      */
-    function _beforeTokenTransfer(
-        address from,
-        address to,
-        uint256 amount
-    ) internal virtual override whenNotPaused {
-        require(!blacklisted[from] && !blacklisted[to], "ClaudeToken: account is blacklisted");
-        super._beforeTokenTransfer(from, to, amount);
+    function transfer(address to, uint256 amount)
+        public
+        virtual
+        override
+        whenNotPaused
+        notBlacklisted(msg.sender)
+        notBlacklisted(to)
+        returns (bool)
+    {
+        return super.transfer(to, amount);
+    }
+
+    /**
+     * @dev Override of the ERC20 transferFrom function with blacklist check
+     */
+    function transferFrom(address from, address to, uint256 amount)
+        public
+        virtual
+        override
+        whenNotPaused
+        notBlacklisted(from)
+        notBlacklisted(to)
+        returns (bool)
+    {
+        return super.transferFrom(from, to, amount);
     }
 
     /**
      * @dev Adds an address to the blacklist
-     * @param account The address to blacklist
+     * @param _account Address to blacklist
      */
-    function blacklistAddress(address account) 
+    function blacklistAddress(address _account) 
         external 
         onlyRole(DEFAULT_ADMIN_ROLE) 
     {
-        blacklisted[account] = true;
+        require(_account != address(0), "Cannot blacklist zero address");
+        require(!blacklisted[_account], "Account already blacklisted");
+        blacklisted[_account] = true;
     }
 
     /**
      * @dev Removes an address from the blacklist
-     * @param account The address to remove from blacklist
+     * @param _account Address to remove from blacklist
      */
-    function removeFromBlacklist(address account) 
+    function unblacklistAddress(address _account) 
         external 
         onlyRole(DEFAULT_ADMIN_ROLE) 
     {
-        blacklisted[account] = false;
+        require(blacklisted[_account], "Account not blacklisted");
+        blacklisted[_account] = false;
     }
 
     /**
-     * @dev Returns the total amount of tokens burned
+     * @dev Pauses all token transfers
      */
-    function totalBurned() public view returns (uint256) {
-        return _totalBurned;
+    function pause() external onlyRole(PAUSER_ROLE) {
+        _pause();
     }
 
     /**
-     * @dev Override of the burn function to track total burned tokens
-     * @param amount The amount of tokens to burn
+     * @dev Unpauses all token transfers
      */
-    function burn(uint256 amount) public virtual override {
-        super.burn(amount);
-        _totalBurned += amount;
-        emit TokensBurned(_msgSender(), amount);
+    function unpause() external onlyRole(PAUSER_ROLE) {
+        _unpause();
     }
 
     /**
-     * @dev Override of the burnFrom function to track total burned tokens
-     * @param account The account to burn from
-     * @param amount The amount of tokens to burn
+     * @dev Override required by Solidity
      */
-    function burnFrom(address account, uint256 amount) public virtual override {
-        super.burnFrom(account, amount);
-        _totalBurned += amount;
-        emit TokensBurned(account, amount);
+    function _beforeTokenTransfer(address from, address to, uint256 amount)
+        internal
+        whenNotPaused
+        override
+    {
+        super._beforeTokenTransfer(from, to, amount);
     }
 }
 ```
@@ -151,50 +157,38 @@ contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, Reentranc
 Key Design Decisions and Features:
 
 1. **Security Features**:
-- Used OpenZeppelin's battle-tested contracts as base
-- Implemented ReentrancyGuard for additional security
-- Added blacklisting functionality for risk management
+- Using OpenZeppelin's battle-tested contracts as base
+- Implementation of ReentrancyGuard for mint function
 - Role-based access control for administrative functions
+- Blacklist functionality for compliance
 - Pausable functionality for emergency situations
 
 2. **Gas Optimization**:
 - Efficient use of modifiers
 - Minimal storage operations
-- Use of constant values where possible
-- Optimized function visibility
+- Use of constant values for fixed parameters
+- Optimized error handling with require statements
 
 3. **Token Economics**:
-- Initial supply: 1 billion tokens
-- Maximum supply: 2 billion tokens
-- Tracking of burned tokens
-- Decimal places: 18 (standard)
+- Initial supply of 1 billion tokens
+- Maximum cap of 2 billion tokens
+- Decimals inherited from ERC20 (18)
 
 4. **Administrative Features**:
-- Role-based minting capability
-- Blacklisting functionality
-- Pause/unpause mechanism
-- Burning tracking
+- Minting capability with role-based access
+- Blacklist management
+- Pause/unpause functionality
+- Burning capability
 
 5. **Error Handling**:
-- Comprehensive require statements
+- Comprehensive input validation
 - Clear error messages
-- Event emission for important state changes
-
-6. **Extensibility**:
-- Contract can be extended for future features
-- Clear separation of concerns
-- Well-documented functions
+- Checks for zero addresses
+- Supply cap validation
 
 To deploy this contract:
-1. Ensure you have OpenZeppelin contracts installed
-2. Deploy using a secure wallet
-3. Initial supply will be minted to deployer
-4. Set up additional roles as needed
+1. Install OpenZeppelin contracts
+2. Deploy with an admin address parameter
+3. The admin will receive the initial supply and all roles
 
-The contract can be further customized based on specific requirements for ClaudeChain, such as:
-- Adding governance features
-- Implementing vesting schedules
-- Adding additional security measures
-- Implementing token economics features
-
-Let me know if you need any clarification or have specific requirements to add!
+This implementation provides a secure, flexible, and gas-efficient token contract suitable for the ClaudeChain ecosystem. Let me know if you need any clarification or have specific requirements to add!
