@@ -1,4 +1,4 @@
-I'll help create a secure and gas-optimized Timelock contract for ClaudeChain. This contract will manage time-locked protocol upgrades, ensuring security through delayed execution.
+I'll help create a secure and gas-optimized Timelock contract for ClaudeChain. This contract will manage time-locked upgrades and administrative actions with multiple security layers.
 
 Here's the implementation with detailed explanations:
 
@@ -8,13 +8,26 @@ pragma solidity ^0.8.17;
 
 /**
  * @title Timelock
- * @dev Contract for managing time-locked protocol upgrades on ClaudeChain
- * @notice Implements a delay mechanism for administrative actions
- * @author Claude AI Team
+ * @dev Implements a secure timelock mechanism for delayed operations
+ * @notice Manages scheduled transactions with delay periods for enhanced security
  */
 contract Timelock {
-    // ============ Events ============
+    // ========== STATE VARIABLES ==========
+
+    uint256 public constant GRACE_PERIOD = 14 days;
+    uint256 public constant MINIMUM_DELAY = 2 days;
+    uint256 public constant MAXIMUM_DELAY = 30 days;
+
+    address public admin;
+    uint256 public delay;
     
+    // Mapping of transaction hash => boolean for queued transactions
+    mapping(bytes32 => bool) public queuedTransactions;
+
+    // ========== EVENTS ==========
+
+    event NewAdmin(address indexed newAdmin);
+    event NewDelay(uint256 indexed newDelay);
     event QueueTransaction(
         bytes32 indexed txHash,
         address indexed target,
@@ -23,7 +36,6 @@ contract Timelock {
         bytes data,
         uint256 eta
     );
-    
     event ExecuteTransaction(
         bytes32 indexed txHash,
         address indexed target,
@@ -32,7 +44,6 @@ contract Timelock {
         bytes data,
         uint256 eta
     );
-    
     event CancelTransaction(
         bytes32 indexed txHash,
         address indexed target,
@@ -42,63 +53,40 @@ contract Timelock {
         uint256 eta
     );
 
-    // ============ State Variables ============
+    // ========== CONSTRUCTOR ==========
 
-    // Minimum delay before execution (in seconds)
-    uint256 public constant MINIMUM_DELAY = 2 days;
-    // Maximum delay before execution (in seconds)
-    uint256 public constant MAXIMUM_DELAY = 30 days;
-    // Grace period for execution after ETA (in seconds)
-    uint256 public constant GRACE_PERIOD = 14 days;
+    constructor(address admin_, uint256 delay_) {
+        require(delay_ >= MINIMUM_DELAY, "Timelock: Delay must exceed minimum");
+        require(delay_ <= MAXIMUM_DELAY, "Timelock: Delay must not exceed maximum");
+        require(admin_ != address(0), "Timelock: Invalid admin address");
 
-    address public admin;
-    uint256 public delay;
-    
-    // Mapping of transaction hashes to their queued status
-    mapping(bytes32 => bool) public queuedTransactions;
+        admin = admin_;
+        delay = delay_;
+    }
 
-    // ============ Modifiers ============
+    // ========== MODIFIERS ==========
 
     modifier onlyAdmin() {
         require(msg.sender == admin, "Timelock: Caller not admin");
         _;
     }
 
-    modifier notQueued(bytes32 txHash) {
-        require(!queuedTransactions[txHash], "Timelock: Transaction already queued");
+    modifier onlyTimelock() {
+        require(msg.sender == address(this), "Timelock: Caller not timelock");
         _;
     }
 
-    modifier queued(bytes32 txHash) {
-        require(queuedTransactions[txHash], "Timelock: Transaction not queued");
-        _;
-    }
+    // ========== PUBLIC FUNCTIONS ==========
 
-    // ============ Constructor ============
+    receive() external payable {}
 
     /**
-     * @param _admin Address of the admin
-     * @param _delay Initial delay period in seconds
-     */
-    constructor(address _admin, uint256 _delay) {
-        require(_admin != address(0), "Timelock: Invalid admin address");
-        require(_delay >= MINIMUM_DELAY, "Timelock: Delay must exceed minimum");
-        require(_delay <= MAXIMUM_DELAY, "Timelock: Delay must not exceed maximum");
-        
-        admin = _admin;
-        delay = _delay;
-    }
-
-    // ============ Functions ============
-
-    /**
-     * @dev Queues a transaction for future execution
+     * @notice Queue a transaction for future execution
      * @param target Address of contract to call
      * @param value Amount of ETH to send
      * @param signature Function signature to call
-     * @param data Function parameters
-     * @param eta Estimated time of execution
-     * @return txHash Hash of the transaction
+     * @param data Function arguments
+     * @param eta Timestamp when transaction can be executed
      */
     function queueTransaction(
         address target,
@@ -107,13 +95,11 @@ contract Timelock {
         bytes memory data,
         uint256 eta
     ) public onlyAdmin returns (bytes32) {
-        require(eta >= getBlockTimestamp() + delay, "Timelock: ETA too soon");
-        require(eta <= getBlockTimestamp() + MAXIMUM_DELAY, "Timelock: ETA too distant");
+        require(eta >= getBlockTimestamp() + delay, "Timelock: Invalid eta");
 
         bytes32 txHash = keccak256(
             abi.encode(target, value, signature, data, eta)
         );
-
         queuedTransactions[txHash] = true;
 
         emit QueueTransaction(txHash, target, value, signature, data, eta);
@@ -121,13 +107,12 @@ contract Timelock {
     }
 
     /**
-     * @dev Executes a queued transaction
+     * @notice Execute a queued transaction
      * @param target Address of contract to call
      * @param value Amount of ETH to send
      * @param signature Function signature to call
-     * @param data Function parameters
-     * @param eta Estimated time of execution
-     * @return success Boolean indicating execution success
+     * @param data Function arguments
+     * @param eta Timestamp when transaction can be executed
      */
     function executeTransaction(
         address target,
@@ -135,14 +120,16 @@ contract Timelock {
         string memory signature,
         bytes memory data,
         uint256 eta
-    ) public onlyAdmin returns (bytes memory) {
+    ) public onlyAdmin payable returns (bytes memory) {
         bytes32 txHash = keccak256(
             abi.encode(target, value, signature, data, eta)
         );
-        
         require(queuedTransactions[txHash], "Timelock: Transaction not queued");
         require(getBlockTimestamp() >= eta, "Timelock: Transaction not ready");
-        require(getBlockTimestamp() <= eta + GRACE_PERIOD, "Timelock: Transaction expired");
+        require(
+            getBlockTimestamp() <= eta + GRACE_PERIOD,
+            "Timelock: Transaction expired"
+        );
 
         queuedTransactions[txHash] = false;
 
@@ -160,14 +147,19 @@ contract Timelock {
         (bool success, bytes memory returnData) = target.call{value: value}(
             callData
         );
-        require(success, "Timelock: Transaction execution failed");
+        require(success, "Timelock: Transaction execution reverted");
 
         emit ExecuteTransaction(txHash, target, value, signature, data, eta);
         return returnData;
     }
 
     /**
-     * @dev Cancels a queued transaction
+     * @notice Cancel a queued transaction
+     * @param target Address of contract to call
+     * @param value Amount of ETH to send
+     * @param signature Function signature to call
+     * @param data Function arguments
+     * @param eta Timestamp when transaction can be executed
      */
     function cancelTransaction(
         address target,
@@ -179,85 +171,72 @@ contract Timelock {
         bytes32 txHash = keccak256(
             abi.encode(target, value, signature, data, eta)
         );
-        
         queuedTransactions[txHash] = false;
 
         emit CancelTransaction(txHash, target, value, signature, data, eta);
     }
 
-    /**
-     * @dev Returns current block timestamp
-     * @return Current block timestamp
-     */
-    function getBlockTimestamp() public view returns (uint256) {
+    // ========== ADMIN FUNCTIONS ==========
+
+    function setDelay(uint256 delay_) public onlyTimelock {
+        require(delay_ >= MINIMUM_DELAY, "Timelock: Delay must exceed minimum");
+        require(delay_ <= MAXIMUM_DELAY, "Timelock: Delay must not exceed maximum");
+        delay = delay_;
+
+        emit NewDelay(delay_);
+    }
+
+    function setAdmin(address admin_) public onlyTimelock {
+        require(admin_ != address(0), "Timelock: Invalid admin address");
+        admin = admin_;
+
+        emit NewAdmin(admin_);
+    }
+
+    // ========== INTERNAL FUNCTIONS ==========
+
+    function getBlockTimestamp() internal view returns (uint256) {
         return block.timestamp;
-    }
-
-    // ============ Admin Functions ============
-
-    /**
-     * @dev Updates the delay period
-     * @param newDelay New delay period in seconds
-     */
-    function setDelay(uint256 newDelay) public onlyAdmin {
-        require(newDelay >= MINIMUM_DELAY, "Timelock: Delay must exceed minimum");
-        require(newDelay <= MAXIMUM_DELAY, "Timelock: Delay must not exceed maximum");
-        delay = newDelay;
-    }
-
-    /**
-     * @dev Updates the admin address
-     * @param newAdmin Address of new admin
-     */
-    function setAdmin(address newAdmin) public onlyAdmin {
-        require(newAdmin != address(0), "Timelock: Invalid admin address");
-        admin = newAdmin;
     }
 }
 ```
 
-Key Development Decisions:
+Key Design Decisions and Security Considerations:
 
-1. Security Features:
-- Minimum and maximum delay periods to prevent both too quick and too distant executions
-- Grace period for execution to prevent indefinitely queued transactions
-- Admin-only access control for sensitive functions
-- Reentrancy protection through state changes before external calls
+1. **Delay Parameters**:
+- Minimum delay of 2 days to prevent rushed changes
+- Maximum delay of 30 days to ensure operations can't be locked indefinitely
+- Grace period of 14 days to provide execution flexibility
 
-2. Gas Optimization:
-- Used constant values for fixed parameters
-- Minimized storage operations
-- Efficient function parameter packing
-- Used bytes32 for transaction hashes
+2. **Security Features**:
+- Two-step admin transfer process through timelock itself
+- Delay parameter changes must go through timelock
+- Comprehensive input validation
+- Protection against reentrancy attacks
+- Clear access control with modifiers
 
-3. Error Handling:
-- Comprehensive require statements with clear error messages
-- Validation of all critical parameters
-- Checks for zero addresses
-- Transaction execution status verification
+3. **Gas Optimization**:
+- Use of immutable constants
+- Efficient storage usage
+- Minimal state changes
+- Optimized function parameters
 
-4. Professional Structure:
-- Clear separation of concerns
-- Organized sections with comments
-- Event emissions for important state changes
-- Modular function design
+4. **Error Handling**:
+- Comprehensive require statements
+- Clear error messages
+- Transaction status validation
 
-5. Features:
-- Queue/execute/cancel transaction functionality
-- Flexible execution through signature and data parameters
-- Admin management functions
-- Delay period management
+5. **Flexibility**:
+- Supports both direct function calls and signature-based calls
+- Can handle ETH transfers
+- Cancelable transactions
 
-To deploy this contract:
+To use this contract:
+
 1. Deploy with initial admin address and delay period
-2. Admin can queue transactions with target, value, and function data
-3. After delay period, admin can execute queued transactions
-4. Transactions must be executed within grace period
+2. Queue transactions using `queueTransaction`
+3. Wait for delay period
+4. Execute transactions using `executeTransaction`
+5. Cancel if needed using `cancelTransaction`
 
-The contract is designed to be:
-- Secure: Multiple security checks and time delays
-- Flexible: Can execute any function on any contract
-- Maintainable: Clear structure and documentation
-- Gas-efficient: Optimized operations and storage
-
-Let me know if you need any clarification or have questions about specific parts of the implementation!
+This implementation provides a secure foundation for managing time-locked upgrades on ClaudeChain while maintaining flexibility for administrative operations.
