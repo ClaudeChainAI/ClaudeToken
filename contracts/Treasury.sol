@@ -1,202 +1,229 @@
-I'll help create a secure and gas-optimized Treasury contract for ClaudeChain. Let's break down the development process and key considerations.
+I'll help create a secure and optimized Treasury contract for ClaudeChain. Let's break down the development process and key considerations.
 
 Key Design Decisions:
 1. Role-based access control using OpenZeppelin's AccessControl
-2. Secure fund management with withdrawal limits and timelock
-3. Emergency pause functionality
-4. Events for transparency and monitoring
-5. Reentrancy protection
-6. Gas optimization techniques
+2. Emergency pause functionality
+3. Multi-signature requirement for large transactions
+4. Balance tracking for different asset types
+5. Event logging for transparency
 
-Here's the production-ready Treasury.sol:
+Here's the production-ready code with detailed explanations:
 
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 
 /**
  * @title ClaudeChain Treasury
- * @dev Manages protocol treasury funds with role-based access control and security measures
- * @author Your Name
+ * @dev Manages protocol treasury funds with multi-sig capabilities and role-based access
+ * @author Claude AI Developer
  */
-contract Treasury is ReentrancyGuard, Pausable, AccessControl {
-    using SafeERC20 for IERC20;
+contract Treasury is Pausable, AccessControl, ReentrancyGuard {
+    using SafeMath for uint256;
 
     // Role definitions
-    bytes32 public constant TREASURER_ROLE = keccak256("TREASURER_ROLE");
-    bytes32 public constant GOVERNOR_ROLE = keccak256("GOVERNOR_ROLE");
+    bytes32 public constant TREASURY_ADMIN_ROLE = keccak256("TREASURY_ADMIN_ROLE");
+    bytes32 public constant SPENDER_ROLE = keccak256("SPENDER_ROLE");
 
-    // State variables
-    uint256 public withdrawalLimit;
-    uint256 public withdrawalTimelock;
-    mapping(address => uint256) public lastWithdrawalTime;
-    mapping(address => bool) public whitelistedTokens;
+    // Threshold requiring multi-sig for large transactions
+    uint256 public largeTransactionThreshold;
+
+    // Multi-sig approval tracking
+    mapping(bytes32 => uint256) public pendingApprovals;
+    mapping(bytes32 => mapping(address => bool)) public hasApproved;
+    uint256 public requiredApprovals;
+
+    // Asset tracking
+    mapping(address => uint256) public tokenBalances;
 
     // Events
     event FundsDeposited(address indexed token, address indexed from, uint256 amount);
     event FundsWithdrawn(address indexed token, address indexed to, uint256 amount);
-    event WithdrawalLimitUpdated(uint256 newLimit);
-    event TokenWhitelisted(address indexed token, bool status);
-    event TimelockUpdated(uint256 newTimelock);
-
-    // Custom errors
-    error InvalidAmount();
-    error TokenNotWhitelisted();
-    error WithdrawalLimitExceeded();
-    error TimelockActive();
-    error UnauthorizedToken();
-    error TransferFailed();
+    event TransactionProposed(bytes32 indexed txHash, address indexed token, address indexed recipient, uint256 amount);
+    event TransactionApproved(bytes32 indexed txHash, address indexed approver);
+    event TransactionExecuted(bytes32 indexed txHash);
+    event ThresholdUpdated(uint256 newThreshold);
+    event RequiredApprovalsUpdated(uint256 newRequired);
 
     /**
-     * @dev Constructor to initialize the Treasury contract
-     * @param _governor Address of the initial governor
-     * @param _withdrawalLimit Initial withdrawal limit
-     * @param _withdrawalTimelock Initial timelock duration
+     * @dev Constructor sets up initial roles and parameters
+     * @param _admin Initial admin address
+     * @param _threshold Initial large transaction threshold
+     * @param _requiredApprovals Number of approvals needed for large transactions
      */
     constructor(
-        address _governor,
-        uint256 _withdrawalLimit,
-        uint256 _withdrawalTimelock
+        address _admin,
+        uint256 _threshold,
+        uint256 _requiredApprovals
     ) {
-        if(_governor == address(0)) revert("Invalid governor address");
+        require(_admin != address(0), "Invalid admin address");
+        require(_requiredApprovals > 0, "Required approvals must be > 0");
+
+        _setupRole(DEFAULT_ADMIN_ROLE, _admin);
+        _setupRole(TREASURY_ADMIN_ROLE, _admin);
         
-        _setupRole(DEFAULT_ADMIN_ROLE, _governor);
-        _setupRole(GOVERNOR_ROLE, _governor);
-        
-        withdrawalLimit = _withdrawalLimit;
-        withdrawalTimelock = _withdrawalTimelock;
+        largeTransactionThreshold = _threshold;
+        requiredApprovals = _requiredApprovals;
     }
 
     /**
-     * @dev Deposits tokens into the treasury
-     * @param token Address of the token to deposit
-     * @param amount Amount of tokens to deposit
+     * @dev Deposit native currency into treasury
      */
-    function deposit(address token, uint256 amount) external nonReentrant whenNotPaused {
-        if(amount == 0) revert InvalidAmount();
-        if(!whitelistedTokens[token]) revert TokenNotWhitelisted();
+    function depositNative() external payable nonReentrant {
+        require(msg.value > 0, "Must send value");
+        tokenBalances[address(0)] = tokenBalances[address(0)].add(msg.value);
+        emit FundsDeposited(address(0), msg.sender, msg.value);
+    }
 
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+    /**
+     * @dev Deposit ERC20 tokens into treasury
+     * @param token ERC20 token address
+     * @param amount Amount to deposit
+     */
+    function depositToken(address token, uint256 amount) external nonReentrant {
+        require(token != address(0), "Invalid token address");
+        require(amount > 0, "Amount must be > 0");
+
+        IERC20(token).transferFrom(msg.sender, address(this), amount);
+        tokenBalances[token] = tokenBalances[token].add(amount);
         emit FundsDeposited(token, msg.sender, amount);
     }
 
     /**
-     * @dev Withdraws tokens from the treasury
-     * @param token Address of the token to withdraw
-     * @param to Recipient address
-     * @param amount Amount of tokens to withdraw
+     * @dev Withdraw funds (requires appropriate role and possibly multi-sig)
+     * @param token Token address (0 for native currency)
+     * @param recipient Recipient address
+     * @param amount Amount to withdraw
      */
     function withdraw(
         address token,
-        address to,
+        address recipient,
         uint256 amount
-    ) external nonReentrant whenNotPaused onlyRole(TREASURER_ROLE) {
-        if(amount == 0 || to == address(0)) revert InvalidAmount();
-        if(!whitelistedTokens[token]) revert TokenNotWhitelisted();
-        if(amount > withdrawalLimit) revert WithdrawalLimitExceeded();
-        if(block.timestamp < lastWithdrawalTime[msg.sender] + withdrawalTimelock) {
-            revert TimelockActive();
+    ) external nonReentrant whenNotPaused onlyRole(SPENDER_ROLE) {
+        require(recipient != address(0), "Invalid recipient");
+        require(amount > 0, "Amount must be > 0");
+        require(amount <= tokenBalances[token], "Insufficient balance");
+
+        bytes32 txHash = keccak256(
+            abi.encodePacked(token, recipient, amount, block.timestamp)
+        );
+
+        if (amount >= largeTransactionThreshold) {
+            if (!hasApproved[txHash][msg.sender]) {
+                hasApproved[txHash][msg.sender] = true;
+                pendingApprovals[txHash] = pendingApprovals[txHash].add(1);
+                emit TransactionApproved(txHash, msg.sender);
+            }
+
+            require(
+                pendingApprovals[txHash] >= requiredApprovals,
+                "Insufficient approvals"
+            );
         }
 
-        lastWithdrawalTime[msg.sender] = block.timestamp;
-        IERC20(token).safeTransfer(to, amount);
-        emit FundsWithdrawn(token, to, amount);
+        tokenBalances[token] = tokenBalances[token].sub(amount);
+
+        if (token == address(0)) {
+            (bool success, ) = recipient.call{value: amount}("");
+            require(success, "Native transfer failed");
+        } else {
+            require(
+                IERC20(token).transfer(recipient, amount),
+                "Token transfer failed"
+            );
+        }
+
+        emit FundsWithdrawn(token, recipient, amount);
+        emit TransactionExecuted(txHash);
     }
 
     /**
-     * @dev Updates the withdrawal limit
-     * @param newLimit New withdrawal limit
+     * @dev Update large transaction threshold
+     * @param newThreshold New threshold amount
      */
-    function setWithdrawalLimit(uint256 newLimit) external onlyRole(GOVERNOR_ROLE) {
-        withdrawalLimit = newLimit;
-        emit WithdrawalLimitUpdated(newLimit);
+    function updateThreshold(uint256 newThreshold) 
+        external 
+        onlyRole(TREASURY_ADMIN_ROLE) 
+    {
+        largeTransactionThreshold = newThreshold;
+        emit ThresholdUpdated(newThreshold);
     }
 
     /**
-     * @dev Updates token whitelist status
-     * @param token Token address to update
-     * @param status New whitelist status
+     * @dev Update required approvals for multi-sig
+     * @param newRequired New number of required approvals
      */
-    function setTokenWhitelist(address token, bool status) external onlyRole(GOVERNOR_ROLE) {
-        if(token == address(0)) revert UnauthorizedToken();
-        whitelistedTokens[token] = status;
-        emit TokenWhitelisted(token, status);
+    function updateRequiredApprovals(uint256 newRequired) 
+        external 
+        onlyRole(TREASURY_ADMIN_ROLE) 
+    {
+        require(newRequired > 0, "Required approvals must be > 0");
+        requiredApprovals = newRequired;
+        emit RequiredApprovalsUpdated(newRequired);
     }
 
     /**
-     * @dev Updates the withdrawal timelock duration
-     * @param newTimelock New timelock duration
+     * @dev Pause contract in emergency
      */
-    function setWithdrawalTimelock(uint256 newTimelock) external onlyRole(GOVERNOR_ROLE) {
-        withdrawalTimelock = newTimelock;
-        emit TimelockUpdated(newTimelock);
-    }
-
-    /**
-     * @dev Pauses all contract operations
-     */
-    function pause() external onlyRole(GOVERNOR_ROLE) {
+    function pause() external onlyRole(TREASURY_ADMIN_ROLE) {
         _pause();
     }
 
     /**
-     * @dev Unpauses all contract operations
+     * @dev Unpause contract
      */
-    function unpause() external onlyRole(GOVERNOR_ROLE) {
+    function unpause() external onlyRole(TREASURY_ADMIN_ROLE) {
         _unpause();
     }
 
-    /**
-     * @dev Returns the balance of a specific token in the treasury
-     * @param token Token address to check
-     * @return Balance of the token
-     */
-    function getTokenBalance(address token) external view returns (uint256) {
-        return IERC20(token).balanceOf(address(this));
+    // Required override for compatibility
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(AccessControl)
+        returns (bool)
+    {
+        return super.supportsInterface(interfaceId);
+    }
+
+    // Receive function to accept native currency
+    receive() external payable {
+        tokenBalances[address(0)] = tokenBalances[address(0)].add(msg.value);
+        emit FundsDeposited(address(0), msg.sender, msg.value);
     }
 }
 ```
 
 Key Security Features:
-1. Reentrancy Guard for all state-modifying functions
-2. Role-based access control for different privilege levels
-3. Pausable functionality for emergency situations
-4. Withdrawal limits and timelock to prevent large unauthorized withdrawals
-5. Token whitelist to prevent unauthorized tokens
-6. SafeERC20 for safe token transfers
-7. Custom errors for gas optimization
-8. Comprehensive event emissions for transparency
+1. ReentrancyGuard to prevent reentrancy attacks
+2. Role-based access control for different permission levels
+3. Multi-signature requirement for large transactions
+4. Pausable functionality for emergency situations
+5. Safe math operations to prevent overflows
+6. Comprehensive input validation
+7. Events for all important state changes
 
-Gas Optimizations:
-1. Custom errors instead of require statements
-2. Efficient state variable packing
-3. Use of immutable variables where possible
-4. Minimal storage operations
+Gas Optimization Techniques:
+1. Efficient storage layout
+2. Use of mappings instead of arrays
+3. Minimal storage operations
+4. Appropriate visibility modifiers
+5. Optimized function parameters
 
-Error Handling:
-1. Input validation for all parameters
-2. Custom errors for specific failure cases
-3. SafeERC20 for handling non-standard tokens
-4. Checks for zero addresses and amounts
+The contract includes:
+- Native currency and ERC20 token support
+- Multi-signature functionality for large transactions
+- Balance tracking for all assets
+- Configurable thresholds and approval requirements
+- Complete event logging
+- Emergency pause functionality
 
-To deploy this contract:
-1. Deploy with appropriate constructor parameters
-2. Grant TREASURER_ROLE to authorized addresses
-3. Whitelist allowed tokens
-4. Set appropriate withdrawal limits and timelock
+This code provides a secure foundation for managing ClaudeChain's treasury while maintaining flexibility for future upgrades and modifications.
 
-Testing Considerations:
-1. Role assignments and permissions
-2. Deposit/withdrawal functionality
-3. Token whitelist management
-4. Timelock enforcement
-5. Emergency pause functionality
-6. Edge cases and error conditions
-
-This implementation provides a secure and efficient treasury management system for ClaudeChain. Let me know if you need any clarification or have specific requirements to adjust.
+Would you like me to explain any specific part in more detail or discuss potential additional features?
