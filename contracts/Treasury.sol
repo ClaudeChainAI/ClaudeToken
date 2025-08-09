@@ -1,13 +1,13 @@
-I'll help develop the Treasury.sol contract with a focus on security, efficiency, and maintainability. Let's break down the development process:
+I'll help develop the Treasury.sol contract with security and best practices in mind. Let me walk you through the development process.
 
-1. First, let's outline the key features needed for a protocol treasury:
-- Secure fund management
-- Access control
-- Multiple asset support (ETH + ERC20)
-- Emergency functions
-- Transparent accounting
+First, let's outline the key requirements and features for a protocol treasury:
+1. Secure fund management
+2. Role-based access control
+3. Support for native token and ERC20 tokens
+4. Emergency functions
+5. Withdrawal limits and timelock mechanisms
 
-2. Here's the production-ready code with detailed explanations:
+Here's the production-ready code with detailed comments:
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -21,30 +21,49 @@ import "@openzeppelin/contracts/security/Pausable.sol";
 
 /**
  * @title ClaudeChain Treasury
- * @dev Manages protocol treasury funds with multi-role access control
- * @author Claude AI Blockchain Team
+ * @notice Manages protocol treasury funds with role-based access and security measures
+ * @dev Implements timelock and withdrawal limits for enhanced security
  */
 contract Treasury is AccessControl, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     // Role definitions
-    bytes32 public constant TREASURY_ADMIN_ROLE = keccak256("TREASURY_ADMIN_ROLE");
-    bytes32 public constant SPENDER_ROLE = keccak256("SPENDER_ROLE");
+    bytes32 public constant TREASURER_ROLE = keccak256("TREASURER_ROLE");
+    bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
+
+    // Withdrawal limits
+    uint256 public constant MAX_WITHDRAWAL = 1000 ether;
+    uint256 public constant TIMELOCK_DURATION = 24 hours;
+
+    // Withdrawal request structure
+    struct WithdrawalRequest {
+        address recipient;
+        uint256 amount;
+        uint256 timestamp;
+        bool isERC20;
+        address tokenAddress;
+        bool executed;
+    }
+
+    // State variables
+    mapping(uint256 => WithdrawalRequest) public withdrawalRequests;
+    uint256 public nextRequestId;
+    mapping(address => uint256) public dailyWithdrawals;
+    mapping(address => uint256) public lastWithdrawalDay;
 
     // Events
-    event FundsDeposited(address indexed token, address indexed from, uint256 amount);
-    event FundsWithdrawn(address indexed token, address indexed to, uint256 amount);
-    event EmergencyWithdrawal(address indexed token, address indexed to, uint256 amount);
-    event SpendingLimitUpdated(address indexed token, uint256 newLimit);
-
-    // Spending limits per token
-    mapping(address => uint256) public dailySpendingLimits;
-    mapping(address => uint256) public dailySpentAmount;
-    mapping(address => uint256) public lastSpendingDay;
-
-    // Constants
-    uint256 private constant ONE_DAY = 1 days;
-    address private constant ETH_ADDRESS = address(0);
+    event WithdrawalRequested(
+        uint256 indexed requestId,
+        address recipient,
+        uint256 amount,
+        address tokenAddress
+    );
+    event WithdrawalExecuted(
+        uint256 indexed requestId,
+        address recipient,
+        uint256 amount
+    );
+    event FundsReceived(address indexed sender, uint256 amount);
 
     /**
      * @dev Constructor sets up initial roles
@@ -52,187 +71,185 @@ contract Treasury is AccessControl, ReentrancyGuard, Pausable {
      */
     constructor(address admin) {
         require(admin != address(0), "Invalid admin address");
-        
         _setupRole(DEFAULT_ADMIN_ROLE, admin);
-        _setupRole(TREASURY_ADMIN_ROLE, admin);
+        _setupRole(TREASURER_ROLE, admin);
+        _setupRole(EMERGENCY_ROLE, admin);
     }
 
     /**
-     * @dev Receive function to accept ETH
+     * @dev Receive function to accept native token payments
      */
     receive() external payable {
-        emit FundsDeposited(ETH_ADDRESS, msg.sender, msg.value);
+        emit FundsReceived(msg.sender, msg.value);
     }
 
     /**
-     * @dev Deposits ERC20 tokens into the treasury
-     * @param token Address of the ERC20 token
-     * @param amount Amount to deposit
-     */
-    function depositToken(address token, uint256 amount) external nonReentrant {
-        require(token != address(0), "Invalid token address");
-        require(amount > 0, "Amount must be greater than 0");
-
-        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        emit FundsDeposited(token, msg.sender, amount);
-    }
-
-    /**
-     * @dev Withdraws funds from the treasury
-     * @param token Address of the token (0x0 for ETH)
-     * @param to Recipient address
+     * @dev Request a withdrawal with timelock
+     * @param recipient Address to receive funds
      * @param amount Amount to withdraw
+     * @param tokenAddress Address of ERC20 token (address(0) for native token)
      */
-    function withdraw(
-        address token,
-        address to,
-        uint256 amount
-    ) external nonReentrant whenNotPaused onlyRole(SPENDER_ROLE) {
-        require(to != address(0), "Invalid recipient");
-        require(amount > 0, "Amount must be greater than 0");
+    function requestWithdrawal(
+        address recipient,
+        uint256 amount,
+        address tokenAddress
+    ) external onlyRole(TREASURER_ROLE) whenNotPaused returns (uint256) {
+        require(recipient != address(0), "Invalid recipient");
+        require(amount > 0, "Invalid amount");
         
-        _checkAndUpdateSpendingLimit(token, amount);
-
-        if (token == ETH_ADDRESS) {
-            (bool success, ) = to.call{value: amount}("");
-            require(success, "ETH transfer failed");
-        } else {
-            IERC20(token).safeTransfer(to, amount);
+        // Check daily withdrawal limits
+        uint256 today = block.timestamp / 1 days;
+        if (lastWithdrawalDay[recipient] < today) {
+            dailyWithdrawals[recipient] = 0;
+            lastWithdrawalDay[recipient] = today;
         }
+        
+        require(
+            dailyWithdrawals[recipient] + amount <= MAX_WITHDRAWAL,
+            "Exceeds daily limit"
+        );
 
-        emit FundsWithdrawn(token, to, amount);
+        uint256 requestId = nextRequestId++;
+        withdrawalRequests[requestId] = WithdrawalRequest({
+            recipient: recipient,
+            amount: amount,
+            timestamp: block.timestamp,
+            isERC20: tokenAddress != address(0),
+            tokenAddress: tokenAddress,
+            executed: false
+        });
+
+        emit WithdrawalRequested(requestId, recipient, amount, tokenAddress);
+        return requestId;
     }
 
     /**
-     * @dev Updates daily spending limit for a token
-     * @param token Address of the token
-     * @param newLimit New daily spending limit
+     * @dev Execute a pending withdrawal after timelock
+     * @param requestId ID of the withdrawal request
      */
-    function updateSpendingLimit(
-        address token,
-        uint256 newLimit
-    ) external onlyRole(TREASURY_ADMIN_ROLE) {
-        dailySpendingLimits[token] = newLimit;
-        emit SpendingLimitUpdated(token, newLimit);
-    }
+    function executeWithdrawal(uint256 requestId) 
+        external 
+        onlyRole(TREASURER_ROLE) 
+        nonReentrant 
+        whenNotPaused 
+    {
+        WithdrawalRequest storage request = withdrawalRequests[requestId];
+        require(!request.executed, "Already executed");
+        require(
+            block.timestamp >= request.timestamp + TIMELOCK_DURATION,
+            "Timelock active"
+        );
 
-    /**
-     * @dev Emergency withdrawal of all funds of a specific token
-     * @param token Address of the token
-     * @param to Recipient address
-     */
-    function emergencyWithdraw(
-        address token,
-        address to
-    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(to != address(0), "Invalid recipient");
+        request.executed = true;
+        dailyWithdrawals[request.recipient] += request.amount;
 
-        uint256 amount;
-        if (token == ETH_ADDRESS) {
-            amount = address(this).balance;
-            (bool success, ) = to.call{value: amount}("");
-            require(success, "ETH transfer failed");
-        } else {
-            amount = IERC20(token).balanceOf(address(this));
-            IERC20(token).safeTransfer(to, amount);
-        }
-
-        emit EmergencyWithdrawal(token, to, amount);
-    }
-
-    /**
-     * @dev Checks and updates daily spending limits
-     * @param token Token address
-     * @param amount Amount to spend
-     */
-    function _checkAndUpdateSpendingLimit(address token, uint256 amount) internal {
-        uint256 limit = dailySpendingLimits[token];
-        if (limit > 0) {
-            uint256 currentDay = block.timestamp / ONE_DAY;
-            if (currentDay > lastSpendingDay[token]) {
-                dailySpentAmount[token] = 0;
-                lastSpendingDay[token] = currentDay;
-            }
-            
+        if (request.isERC20) {
+            IERC20 token = IERC20(request.tokenAddress);
             require(
-                dailySpentAmount[token] + amount <= limit,
-                "Daily spending limit exceeded"
+                token.balanceOf(address(this)) >= request.amount,
+                "Insufficient balance"
             );
-            
-            dailySpentAmount[token] += amount;
+            token.safeTransfer(request.recipient, request.amount);
+        } else {
+            require(
+                address(this).balance >= request.amount,
+                "Insufficient balance"
+            );
+            (bool success, ) = request.recipient.call{value: request.amount}("");
+            require(success, "Transfer failed");
+        }
+
+        emit WithdrawalExecuted(requestId, request.recipient, request.amount);
+    }
+
+    /**
+     * @dev Emergency withdrawal of all funds to safe address
+     * @param safeAddress Address to receive funds
+     */
+    function emergencyWithdraw(address safeAddress) 
+        external 
+        onlyRole(EMERGENCY_ROLE) 
+    {
+        require(safeAddress != address(0), "Invalid safe address");
+        uint256 balance = address(this).balance;
+        if (balance > 0) {
+            (bool success, ) = safeAddress.call{value: balance}("");
+            require(success, "Transfer failed");
         }
     }
 
     /**
-     * @dev Returns the balance of a specific token
-     * @param token Address of the token
+     * @dev Emergency withdrawal of ERC20 tokens
+     * @param token Address of ERC20 token
+     * @param safeAddress Address to receive tokens
      */
-    function getBalance(address token) external view returns (uint256) {
-        if (token == ETH_ADDRESS) {
-            return address(this).balance;
+    function emergencyWithdrawERC20(
+        address token,
+        address safeAddress
+    ) external onlyRole(EMERGENCY_ROLE) {
+        require(safeAddress != address(0), "Invalid safe address");
+        require(token != address(0), "Invalid token address");
+        
+        IERC20 tokenContract = IERC20(token);
+        uint256 balance = tokenContract.balanceOf(address(this));
+        if (balance > 0) {
+            tokenContract.safeTransfer(safeAddress, balance);
         }
-        return IERC20(token).balanceOf(address(this));
     }
 
     /**
-     * @dev Pauses all non-admin functions
+     * @dev Pause all non-emergency functions
      */
-    function pause() external onlyRole(TREASURY_ADMIN_ROLE) {
+    function pause() external onlyRole(EMERGENCY_ROLE) {
         _pause();
     }
 
     /**
-     * @dev Unpauses all non-admin functions
+     * @dev Unpause all non-emergency functions
      */
-    function unpause() external onlyRole(TREASURY_ADMIN_ROLE) {
+    function unpause() external onlyRole(EMERGENCY_ROLE) {
         _unpause();
     }
 }
 ```
 
-Key security features and design decisions:
+Key design decisions and security measures:
 
-1. Access Control:
+1. **Access Control**:
 - Used OpenZeppelin's AccessControl for role-based permissions
-- Separate roles for admin and spender functions
-- Emergency functions restricted to admin only
+- Separate roles for treasury operations and emergency functions
 
-2. Security Measures:
+2. **Security Features**:
 - ReentrancyGuard to prevent reentrancy attacks
 - Pausable functionality for emergency situations
-- SafeERC20 for safe token transfers
-- Comprehensive input validation
-- Daily spending limits with automatic resets
+- Timelock mechanism for withdrawals
+- Daily withdrawal limits
+- Safe transfer patterns for ERC20 tokens
 
-3. Gas Optimization:
-- Efficient storage usage
-- Minimal state changes
-- Use of constant values
-- Optimized function modifiers
-
-4. Error Handling:
-- Detailed require statements
+3. **Error Handling**:
+- Comprehensive require statements
 - Clear error messages
-- Event emissions for important state changes
+- Input validation
 
-5. Additional Features:
-- Support for both ETH and ERC20 tokens
-- Daily spending limits with automatic reset
-- Emergency withdrawal function
-- Balance checking functionality
-- Transparent event logging
+4. **Gas Optimization**:
+- Efficient state variable usage
+- Minimal storage operations
+- Used mappings for O(1) lookups
+
+5. **Additional Features**:
+- Support for both native token and ERC20 tokens
+- Emergency withdrawal functions
+- Event emission for important actions
+- Daily withdrawal tracking
+
+The contract implements a two-step withdrawal process:
+1. Request withdrawal (creates timelock)
+2. Execute withdrawal (after timelock period)
+
+This provides additional security and allows for monitoring of large withdrawals before they're executed.
 
 To deploy this contract:
-1. Install OpenZeppelin dependencies
-2. Deploy with an initial admin address
-3. Set up additional roles and spending limits
-4. Test all functions thoroughly
-
-The contract is designed to be:
-- Secure against common attacks
-- Flexible for future upgrades
-- Easy to maintain
-- Gas efficient
-- Well-documented
-
-Would you like me to explain any specific part in more detail?
+1. Ensure OpenZeppelin dependencies are installed
+2. Deploy with initial admin address
+3. Set up additional role holders as needed
+4. Test all functions thoroughly, especially emergency functions
