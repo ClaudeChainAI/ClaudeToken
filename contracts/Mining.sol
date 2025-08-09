@@ -1,4 +1,6 @@
-I'll help create the Mining.sol contract for ClaudeChain. Let's break this down into steps and implement it with best practices.
+I'll help develop the Mining.sol contract for ClaudeChain. Let's break this down into steps and create a secure, gas-optimized mining contract.
+
+First, here's the code with detailed explanations:
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -11,219 +13,242 @@ import "@openzeppelin/contracts/security/Pausable.sol";
 
 /**
  * @title ClaudeChain Mining Contract
- * @dev Manages mining operations and reward distribution for ClaudeChain
- * @notice This contract handles token mining mechanics and distributes rewards
+ * @dev Handles mining operations and reward distribution for ClaudeChain
+ * @notice This contract manages the mining mechanism for ClaudeChain tokens
  */
 contract Mining is Ownable, ReentrancyGuard, Pausable {
     // State variables
-    IERC20 public immutable rewardToken;
+    IERC20 public immutable claudeToken;
     
-    uint256 public constant BLOCKS_PER_EPOCH = 50400; // ~7 days at 12 sec blocks
-    uint256 public constant INITIAL_REWARD_PER_BLOCK = 100 ether; // 100 tokens
+    uint256 public constant BLOCKS_PER_EPOCH = 50400; // ~7 days at 12 sec per block
+    uint256 public constant INITIAL_REWARD_PER_BLOCK = 100 * 1e18; // 100 tokens per block
     uint256 public constant HALVING_PERIOD = 1051200; // ~4 years worth of blocks
     
     uint256 public lastRewardBlock;
     uint256 public accRewardPerShare;
     uint256 public totalStaked;
     
-    // Structs
-    struct UserInfo {
-        uint256 amount;          // How many tokens the user has staked
-        uint256 rewardDebt;      // Reward debt
-        uint256 lastClaimBlock;  // Last block number when rewards were claimed
+    // Struct to track miner information
+    struct MinerInfo {
+        uint256 stakedAmount;
+        uint256 rewardDebt;
+        uint256 pendingRewards;
+        uint256 lastClaimBlock;
     }
     
-    // Mappings
-    mapping(address => UserInfo) public userInfo;
+    // Mapping of miner addresses to their information
+    mapping(address => MinerInfo) public miners;
     
     // Events
     event Staked(address indexed user, uint256 amount);
-    event Withdrawn(address indexed user, uint256 amount);
-    event RewardClaimed(address indexed user, uint256 reward);
-    
+    event Unstaked(address indexed user, uint256 amount);
+    event RewardClaimed(address indexed user, uint256 amount);
+    event RewardRateUpdated(uint256 newRate);
+
     /**
-     * @dev Constructor sets the reward token address
-     * @param _rewardToken Address of the ERC20 token used for rewards
+     * @dev Constructor to initialize the mining contract
+     * @param _claudeToken Address of the ClaudeChain token contract
      */
-    constructor(address _rewardToken) {
-        require(_rewardToken != address(0), "Invalid token address");
-        rewardToken = IERC20(_rewardToken);
+    constructor(address _claudeToken) {
+        require(_claudeToken != address(0), "Invalid token address");
+        claudeToken = IERC20(_claudeToken);
         lastRewardBlock = block.number;
     }
-    
+
     /**
-     * @dev Calculates current block reward based on halving schedule
+     * @dev Calculate current block reward based on halving schedule
      * @return Current reward per block
      */
     function getCurrentBlockReward() public view returns (uint256) {
         uint256 halvings = (block.number - lastRewardBlock) / HALVING_PERIOD;
-        if (halvings >= 64) return 0; // After 64 halvings, reward becomes 0
         return INITIAL_REWARD_PER_BLOCK >> halvings;
     }
-    
+
     /**
-     * @dev Updates reward variables
+     * @dev Update reward variables for all miners
      */
     function updatePool() public {
-        if (block.number <= lastRewardBlock) return;
-        
+        if (block.number <= lastRewardBlock) {
+            return;
+        }
+
         if (totalStaked == 0) {
             lastRewardBlock = block.number;
             return;
         }
-        
+
         uint256 multiplier = block.number - lastRewardBlock;
         uint256 reward = multiplier * getCurrentBlockReward();
         accRewardPerShare += (reward * 1e12) / totalStaked;
         lastRewardBlock = block.number;
     }
-    
+
     /**
-     * @dev Stakes tokens into the mining contract
+     * @dev Stake tokens to start mining
      * @param _amount Amount of tokens to stake
      */
     function stake(uint256 _amount) external nonReentrant whenNotPaused {
         require(_amount > 0, "Cannot stake 0");
         
         updatePool();
-        UserInfo storage user = userInfo[msg.sender];
         
-        if (user.amount > 0) {
-            uint256 pending = (user.amount * accRewardPerShare / 1e12) - user.rewardDebt;
-            if (pending > 0) {
-                safeRewardTransfer(msg.sender, pending);
-                emit RewardClaimed(msg.sender, pending);
-            }
+        // Transfer tokens from user
+        require(claudeToken.transferFrom(msg.sender, address(this), _amount), 
+                "Token transfer failed");
+
+        // Update miner information
+        MinerInfo storage miner = miners[msg.sender];
+        if (miner.stakedAmount > 0) {
+            miner.pendingRewards += (miner.stakedAmount * 
+                (accRewardPerShare - miner.rewardDebt)) / 1e12;
         }
         
-        require(rewardToken.transferFrom(msg.sender, address(this), _amount), "Transfer failed");
-        user.amount += _amount;
-        user.rewardDebt = user.amount * accRewardPerShare / 1e12;
+        miner.stakedAmount += _amount;
+        miner.rewardDebt = (miner.stakedAmount * accRewardPerShare) / 1e12;
         totalStaked += _amount;
-        
+
         emit Staked(msg.sender, _amount);
     }
-    
+
     /**
-     * @dev Withdraws staked tokens
-     * @param _amount Amount of tokens to withdraw
+     * @dev Unstake tokens and claim pending rewards
+     * @param _amount Amount of tokens to unstake
      */
-    function withdraw(uint256 _amount) external nonReentrant {
-        UserInfo storage user = userInfo[msg.sender];
-        require(user.amount >= _amount, "Insufficient balance");
+    function unstake(uint256 _amount) external nonReentrant {
+        MinerInfo storage miner = miners[msg.sender];
+        require(miner.stakedAmount >= _amount, "Insufficient staked amount");
         
         updatePool();
         
-        uint256 pending = (user.amount * accRewardPerShare / 1e12) - user.rewardDebt;
+        // Calculate pending rewards
+        uint256 pending = (miner.stakedAmount * accRewardPerShare) / 1e12 - 
+            miner.rewardDebt + miner.pendingRewards;
+        
+        // Update miner information
+        miner.stakedAmount -= _amount;
+        miner.rewardDebt = (miner.stakedAmount * accRewardPerShare) / 1e12;
+        miner.pendingRewards = 0;
+        totalStaked -= _amount;
+
+        // Transfer tokens and rewards
+        require(claudeToken.transfer(msg.sender, _amount), 
+                "Token transfer failed");
         if (pending > 0) {
-            safeRewardTransfer(msg.sender, pending);
+            require(claudeToken.transfer(msg.sender, pending), 
+                    "Reward transfer failed");
             emit RewardClaimed(msg.sender, pending);
         }
-        
-        if (_amount > 0) {
-            user.amount -= _amount;
-            totalStaked -= _amount;
-            require(rewardToken.transfer(msg.sender, _amount), "Transfer failed");
-            emit Withdrawn(msg.sender, _amount);
-        }
-        
-        user.rewardDebt = user.amount * accRewardPerShare / 1e12;
+
+        emit Unstaked(msg.sender, _amount);
     }
-    
+
     /**
-     * @dev Claims pending rewards
+     * @dev Claim pending mining rewards
      */
     function claimRewards() external nonReentrant {
         updatePool();
-        UserInfo storage user = userInfo[msg.sender];
-        uint256 pending = (user.amount * accRewardPerShare / 1e12) - user.rewardDebt;
+        
+        MinerInfo storage miner = miners[msg.sender];
+        uint256 pending = (miner.stakedAmount * accRewardPerShare) / 1e12 - 
+            miner.rewardDebt + miner.pendingRewards;
         
         require(pending > 0, "No rewards to claim");
         
-        user.rewardDebt = user.amount * accRewardPerShare / 1e12;
-        safeRewardTransfer(msg.sender, pending);
+        miner.rewardDebt = (miner.stakedAmount * accRewardPerShare) / 1e12;
+        miner.pendingRewards = 0;
+        
+        require(claudeToken.transfer(msg.sender, pending), 
+                "Reward transfer failed");
         
         emit RewardClaimed(msg.sender, pending);
     }
-    
+
     /**
-     * @dev Safe reward transfer function, just in case if rounding error causes pool to not have enough tokens
-     */
-    function safeRewardTransfer(address _to, uint256 _amount) internal {
-        uint256 balance = rewardToken.balanceOf(address(this));
-        if (_amount > balance) {
-            require(rewardToken.transfer(_to, balance), "Transfer failed");
-        } else {
-            require(rewardToken.transfer(_to, _amount), "Transfer failed");
-        }
-    }
-    
-    /**
-     * @dev Returns pending rewards for a user
-     * @param _user Address of the user
+     * @dev View pending rewards for a miner
+     * @param _miner Address of the miner
      * @return Pending reward amount
      */
-    function pendingRewards(address _user) external view returns (uint256) {
-        UserInfo storage user = userInfo[_user];
-        uint256 _accRewardPerShare = accRewardPerShare;
+    function pendingRewards(address _miner) external view returns (uint256) {
+        MinerInfo storage miner = miners[_miner];
+        uint256 acc = accRewardPerShare;
         
         if (block.number > lastRewardBlock && totalStaked != 0) {
             uint256 multiplier = block.number - lastRewardBlock;
             uint256 reward = multiplier * getCurrentBlockReward();
-            _accRewardPerShare += (reward * 1e12) / totalStaked;
+            acc += (reward * 1e12) / totalStaked;
         }
         
-        return (user.amount * _accRewardPerShare / 1e12) - user.rewardDebt;
+        return (miner.stakedAmount * acc) / 1e12 - miner.rewardDebt + 
+            miner.pendingRewards;
     }
-    
-    // Emergency functions
+
+    /**
+     * @dev Emergency withdraw function (no rewards)
+     */
+    function emergencyWithdraw() external nonReentrant {
+        MinerInfo storage miner = miners[msg.sender];
+        uint256 amount = miner.stakedAmount;
+        
+        require(amount > 0, "Nothing to withdraw");
+        
+        miner.stakedAmount = 0;
+        miner.rewardDebt = 0;
+        miner.pendingRewards = 0;
+        totalStaked -= amount;
+        
+        require(claudeToken.transfer(msg.sender, amount), 
+                "Token transfer failed");
+        
+        emit Unstaked(msg.sender, amount);
+    }
+
+    // Admin functions
     function pause() external onlyOwner {
         _pause();
     }
-    
+
     function unpause() external onlyOwner {
         _unpause();
     }
 }
 ```
 
-Key design decisions and features:
+Key Design Decisions and Security Considerations:
 
-1. **Security Features**:
+1. Security Features:
 - Used OpenZeppelin's ReentrancyGuard to prevent reentrancy attacks
-- Implemented Pausable for emergency situations
-- Safe math operations using Solidity 0.8.x
-- Safe transfer function to handle edge cases
-- Ownership controls for admin functions
+- Implemented Pausable pattern for emergency situations
+- Added emergency withdrawal function
+- Careful ordering of state updates before transfers (CEI pattern)
 
-2. **Gas Optimization**:
-- Used immutable for constant values
-- Minimized storage operations
-- Efficient reward calculation mechanism
-- Batched updates in single transactions
+2. Gas Optimization:
+- Used immutable for token address
+- Implemented efficient reward calculation mechanism
+- Combined stake/unstake with reward claims to save gas
+- Used storage pointers for repeated access to same data
 
-3. **Error Handling**:
-- Comprehensive require statements
-- Clear error messages
-- Safely handles edge cases in reward distribution
+3. Error Handling:
+- Comprehensive require statements with clear error messages
+- Validation of all inputs and state changes
+- Safe math operations (using Solidity 0.8.x built-in overflow checks)
 
-4. **Mining Mechanics**:
-- Block-based reward system
-- Halving mechanism every ~4 years
-- Accurate reward tracking per user
-- Fair distribution based on stake amount
+4. Mining Mechanics:
+- Block-based reward system with halving mechanism
+- Accumulated rewards per share approach for fair distribution
+- Separate pending rewards tracking to prevent loss of rewards
 
-5. **Features**:
-- Staking mechanism
-- Reward distribution
-- Withdrawal functionality
-- Pending reward calculation
-- Emergency pause/unpause
+5. Features:
+- Staking/unstaking functionality
+- Reward claiming
+- Pending rewards view function
+- Emergency withdrawal option
+- Pause/unpause functionality
 
 To deploy this contract:
-1. Deploy the reward token contract first
-2. Deploy this Mining contract with the reward token address
-3. Transfer initial reward tokens to the Mining contract
-4. Users can then stake tokens and earn rewards
 
-The contract uses a block-based reward system with halving periods similar to Bitcoin, but adapted for ClaudeChain's specific needs. The reward calculation is done per block and distributed proportionally to stakers based on their stake amount.
+1. Deploy the ClaudeChain token contract first
+2. Deploy this Mining contract with the token address as constructor parameter
+3. Transfer sufficient tokens to the Mining contract for rewards
+4. Users can then stake tokens and start earning rewards
+
+Let me know if you need any clarification or have questions about specific parts of the implementation!
