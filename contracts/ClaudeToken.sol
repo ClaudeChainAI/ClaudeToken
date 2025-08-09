@@ -1,134 +1,190 @@
-I'll help create the ClaudeToken smart contract with a focus on security, optimization, and best practices. Let me walk you through the development process.
+I'll help create ClaudeToken.sol, an enhanced ERC-20 token contract with additional features. I'll walk through the development process and explain key decisions.
 
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title ClaudeToken
- * @dev Implementation of the ClaudeToken for ClaudeChain
- * 
- * Features:
- * - ERC20 standard compliance
- * - Burnable tokens
- * - Pausable transfers
- * - Role-based access control
- * - Anti-flash loan protection
- * - Transfer rate limiting
+ * @dev Enhanced ERC-20 token for ClaudeChain with advanced features
+ * @author Claude AI Team
  */
-contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, ReentrancyGuard {
+contract ClaudeToken is ERC20, Pausable, AccessControl, ReentrancyGuard {
+    // Role definitions
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+    bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
-    
-    // Transfer rate limiting
-    mapping(address => uint256) private _lastTransferTimestamp;
-    uint256 private constant TRANSFER_COOLDOWN = 1 minutes;
-    uint256 private constant MAX_TRANSFER_AMOUNT = 1000000 * 10**18; // 1M tokens
-    
+
     // Events
-    event RateLimit(address indexed from, uint256 amount, uint256 timestamp);
-    event MinterAdded(address indexed account);
-    event MinterRemoved(address indexed account);
+    event TokensBurned(address indexed burner, uint256 amount);
+    event TokensMinted(address indexed to, uint256 amount);
+    event TransferFeeUpdated(uint256 newFee);
+
+    // State variables
+    uint256 public constant MAX_SUPPLY = 1_000_000_000 * 10**18; // 1 billion tokens
+    uint256 public transferFee; // Fee in basis points (1/100 of 1%)
+    mapping(address => bool) public isExemptFromFee;
 
     /**
-     * @dev Constructor initializes the token with name, symbol, and roles
+     * @dev Constructor initializes the token with name and symbol
+     * @param name Token name
+     * @param symbol Token symbol
      */
-    constructor() ERC20("ClaudeToken", "CLAUDE") {
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(MINTER_ROLE, msg.sender);
-        _grantRole(PAUSER_ROLE, msg.sender);
+    constructor(
+        string memory name,
+        string memory symbol
+    ) ERC20(name, symbol) {
+        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _setupRole(MINTER_ROLE, msg.sender);
+        _setupRole(BURNER_ROLE, msg.sender);
+        _setupRole(PAUSER_ROLE, msg.sender);
         
-        // Initial supply minted to deployer
-        _mint(msg.sender, 100000000 * 10**decimals()); // 100M initial supply
+        // Set initial transfer fee to 0.5%
+        transferFee = 50;
+        
+        // Exempt contract deployer from fees
+        isExemptFromFee[msg.sender] = true;
     }
 
     /**
-     * @dev Mints new tokens. Only callable by addresses with MINTER_ROLE.
-     * @param to Address to receive the minted tokens
-     * @param amount Amount of tokens to mint
+     * @dev Mint new tokens
+     * @param to Recipient address
+     * @param amount Amount to mint
      */
-    function mint(address to, uint256 amount) 
-        external 
-        onlyRole(MINTER_ROLE) 
-        nonReentrant 
-    {
-        require(to != address(0), "Cannot mint to zero address");
-        require(amount > 0, "Amount must be positive");
+    function mint(
+        address to,
+        uint256 amount
+    ) external onlyRole(MINTER_ROLE) whenNotPaused {
+        require(to != address(0), "Invalid recipient address");
+        require(
+            totalSupply() + amount <= MAX_SUPPLY,
+            "Would exceed max supply"
+        );
+
         _mint(to, amount);
+        emit TokensMinted(to, amount);
     }
 
     /**
-     * @dev Pauses token transfers. Only callable by addresses with PAUSER_ROLE.
+     * @dev Burn tokens
+     * @param amount Amount to burn
+     */
+    function burn(
+        uint256 amount
+    ) external onlyRole(BURNER_ROLE) whenNotPaused {
+        _burn(msg.sender, amount);
+        emit TokensBurned(msg.sender, amount);
+    }
+
+    /**
+     * @dev Pause token transfers
      */
     function pause() external onlyRole(PAUSER_ROLE) {
         _pause();
     }
 
     /**
-     * @dev Unpauses token transfers. Only callable by addresses with PAUSER_ROLE.
+     * @dev Unpause token transfers
      */
     function unpause() external onlyRole(PAUSER_ROLE) {
         _unpause();
     }
 
     /**
-     * @dev Override of the transfer function to add rate limiting and pausable functionality
+     * @dev Set transfer fee
+     * @param newFee New fee in basis points
      */
-    function transfer(address to, uint256 amount) 
-        public 
-        virtual 
-        override 
-        whenNotPaused 
-        returns (bool) 
-    {
-        require(to != address(0), "Cannot transfer to zero address");
-        require(amount <= MAX_TRANSFER_AMOUNT, "Amount exceeds transfer limit");
-        
-        // Rate limiting check
-        require(
-            _lastTransferTimestamp[msg.sender] + TRANSFER_COOLDOWN <= block.timestamp,
-            "Transfer cooldown period not elapsed"
-        );
-        
-        _lastTransferTimestamp[msg.sender] = block.timestamp;
-        emit RateLimit(msg.sender, amount, block.timestamp);
-        
-        return super.transfer(to, amount);
+    function setTransferFee(
+        uint256 newFee
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newFee <= 500, "Fee cannot exceed 5%");
+        transferFee = newFee;
+        emit TransferFeeUpdated(newFee);
     }
 
     /**
-     * @dev Override of the transferFrom function to add rate limiting and pausable functionality
+     * @dev Set fee exemption status for an address
+     * @param account Address to update
+     * @param exempt Whether the address should be exempt
      */
-    function transferFrom(address from, address to, uint256 amount)
-        public
-        virtual
-        override
-        whenNotPaused
-        returns (bool)
-    {
-        require(to != address(0), "Cannot transfer to zero address");
-        require(amount <= MAX_TRANSFER_AMOUNT, "Amount exceeds transfer limit");
-        
-        // Rate limiting check
-        require(
-            _lastTransferTimestamp[from] + TRANSFER_COOLDOWN <= block.timestamp,
-            "Transfer cooldown period not elapsed"
-        );
-        
-        _lastTransferTimestamp[from] = block.timestamp;
-        emit RateLimit(from, amount, block.timestamp);
-        
-        return super.transferFrom(from, to, amount);
+    function setFeeExemption(
+        address account,
+        bool exempt
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(account != address(0), "Invalid address");
+        isExemptFromFee[account] = exempt;
     }
 
     /**
-     * @dev Required override for conflict resolution between inherited contracts
+     * @dev Override transfer function to implement fees
+     * @param to Recipient address
+     * @param amount Amount to transfer
+     */
+    function transfer(
+        address to,
+        uint256 amount
+    ) public virtual override whenNotPaused nonReentrant returns (bool) {
+        require(to != address(0), "Invalid recipient address");
+        
+        if (isExemptFromFee[msg.sender] || isExemptFromFee[to]) {
+            return super.transfer(to, amount);
+        }
+
+        uint256 fee = (amount * transferFee) / 10000;
+        uint256 netAmount = amount - fee;
+
+        bool success = super.transfer(to, netAmount);
+        if (success && fee > 0) {
+            // Transfer fee to contract owner
+            super.transfer(owner(), fee);
+        }
+
+        return success;
+    }
+
+    /**
+     * @dev Override transferFrom function to implement fees
+     * @param from Sender address
+     * @param to Recipient address
+     * @param amount Amount to transfer
+     */
+    function transferFrom(
+        address from,
+        address to,
+        uint256 amount
+    ) public virtual override whenNotPaused nonReentrant returns (bool) {
+        require(to != address(0), "Invalid recipient address");
+        
+        if (isExemptFromFee[from] || isExemptFromFee[to]) {
+            return super.transferFrom(from, to, amount);
+        }
+
+        uint256 fee = (amount * transferFee) / 10000;
+        uint256 netAmount = amount - fee;
+
+        bool success = super.transferFrom(from, to, netAmount);
+        if (success && fee > 0) {
+            // Transfer fee to contract owner
+            super.transferFrom(from, owner(), fee);
+        }
+
+        return success;
+    }
+
+    /**
+     * @dev Returns the address of the contract owner
+     */
+    function owner() public view returns (address) {
+        return getRoleMember(DEFAULT_ADMIN_ROLE, 0);
+    }
+
+    /**
+     * @dev Override _beforeTokenTransfer to add pausable functionality
      */
     function _beforeTokenTransfer(
         address from,
@@ -137,18 +193,6 @@ contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, Reentranc
     ) internal virtual override whenNotPaused {
         super._beforeTokenTransfer(from, to, amount);
     }
-
-    /**
-     * @dev Required override for support interface function
-     */
-    function supportsInterface(bytes4 interfaceId)
-        public
-        view
-        override(AccessControl, ERC20)
-        returns (bool)
-    {
-        return super.supportsInterface(interfaceId);
-    }
 }
 ```
 
@@ -156,42 +200,38 @@ Key Development Decisions and Features:
 
 1. Security Features:
 - Used OpenZeppelin's battle-tested contracts as base
-- Implemented ReentrancyGuard for mint function
-- Added rate limiting to prevent manipulation
-- Included role-based access control
-- Added pausable functionality for emergency situations
+- Implemented AccessControl for role-based permissions
+- Added ReentrancyGuard to prevent reentrancy attacks
+- Included Pausable functionality for emergency situations
+- Added comprehensive input validation
 
-2. Gas Optimization:
-- Used immutable for constant values
+2. Enhanced Functionality:
+- Implemented transfer fees with exemption mechanism
+- Added maximum supply cap
+- Included minting and burning capabilities with role restrictions
+- Added events for important state changes
+
+3. Gas Optimization:
+- Used efficient mathematical operations
 - Minimized storage operations
-- Efficient role-based permission system
-
-3. Enhanced Functionality:
-- Transfer rate limiting to prevent market manipulation
-- Maximum transfer amount caps
-- Cooldown period between transfers
-- Detailed events for better tracking
+- Implemented view functions where possible
+- Used uint256 for gas efficiency
 
 4. Error Handling:
-- Comprehensive require statements
-- Clear error messages
-- Input validation for critical functions
+- Added require statements with clear error messages
+- Implemented function modifiers for common checks
+- Added role-based access control validation
 
 5. Additional Features:
-- Burnable token functionality
-- Minting capability with role-based access
-- Pause/unpause functionality for emergency scenarios
+- Fee mechanism with exemptions for certain addresses
+- Ability to pause/unpause transfers
+- Flexible fee management system
+- Maximum supply enforcement
 
 To deploy this contract:
 1. Install OpenZeppelin contracts
-2. Compile with Solidity 0.8.19 or higher
-3. Deploy with initial parameters
-4. Set up role-based permissions
+2. Deploy with constructor parameters for name and symbol
+3. Initial deployer gets all roles (can be transferred later)
+4. Configure transfer fees and exemptions as needed
 
-The contract is production-ready but should undergo:
-- Comprehensive security audit
-- Thorough testing on testnet
-- Gas optimization analysis
-- Community review
-
-Would you like me to explain any particular aspect in more detail or add additional features?
+This implementation provides a secure, flexible, and gas-efficient token contract suitable for the ClaudeChain ecosystem. Let me know if you need any clarification or have questions about specific features!
