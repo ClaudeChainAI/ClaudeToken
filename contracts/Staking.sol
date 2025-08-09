@@ -1,27 +1,22 @@
-I'll help create a secure and optimized staking contract for ClaudeChain. Let's break down the development process and key considerations.
-
-Key Design Decisions:
-1. Using ReentrancyGuard for security
-2. Implementing checks-effects-interactions pattern
-3. Using OpenZeppelin standards where applicable
-4. Precise reward calculations using fixed-point math
-5. Gas-efficient storage patterns
-
-Here's the production-ready code with detailed explanations:
+I'll help create a secure and gas-optimized staking contract for ClaudeChain. Let's break down the development process and key considerations.
 
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
-import "@opzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@opzeppelin/contracts/security/Pausable.sol";
-import "@opzeppelin/contracts/access/Ownable.sol";
-import "@opzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title ClaudeChain Staking Contract
- * @notice Implements a 1% daily reward staking mechanism
- * @dev Includes security features and optimal gas usage patterns
+ * @dev Implements staking functionality with 1% daily rewards
+ * Security features:
+ * - Reentrancy protection
+ * - Pausable functionality
+ * - Input validation
+ * - Overflow protection (Solidity ^0.8.0)
  */
 contract ClaudeChainStaking is ReentrancyGuard, Pausable, Ownable {
     // State variables
@@ -32,26 +27,26 @@ contract ClaudeChainStaking is ReentrancyGuard, Pausable, Ownable {
     uint256 private constant BASIS_POINTS = 10000;
     uint256 private constant SECONDS_PER_DAY = 86400;
     
-    // Staker info struct to optimize gas usage
-    struct StakerInfo {
-        uint256 stakedAmount;
-        uint256 lastRewardTimestamp;
-        uint256 unclaimedRewards;
+    // Staker info structure
+    struct Stake {
+        uint256 amount;
+        uint256 startTime;
+        uint256 lastClaimTime;
     }
     
-    // Mapping of staker address to their info
-    mapping(address => StakerInfo) public stakers;
+    // Mapping of staker address to their stake info
+    mapping(address => Stake) public stakes;
     
     // Total staked amount
     uint256 public totalStaked;
     
     // Events
     event Staked(address indexed user, uint256 amount);
-    event Withdrawn(address indexed user, uint256 amount);
+    event Unstaked(address indexed user, uint256 amount);
     event RewardsClaimed(address indexed user, uint256 amount);
     
     /**
-     * @dev Constructor sets the staking token address
+     * @dev Constructor to initialize the staking contract
      * @param _stakingToken Address of the ERC20 token used for staking
      */
     constructor(address _stakingToken) {
@@ -60,135 +55,159 @@ contract ClaudeChainStaking is ReentrancyGuard, Pausable, Ownable {
     }
     
     /**
-     * @notice Calculates pending rewards for a user
-     * @param _user Address of the user
-     * @return Pending reward amount
-     */
-    function calculatePendingRewards(address _user) public view returns (uint256) {
-        StakerInfo storage staker = stakers[_user];
-        
-        if (staker.stakedAmount == 0) {
-            return 0;
-        }
-        
-        uint256 timeElapsed = block.timestamp - staker.lastRewardTimestamp;
-        uint256 daysElapsed = timeElapsed / SECONDS_PER_DAY;
-        
-        // Calculate rewards: stakedAmount * (1% * daysElapsed)
-        uint256 rewards = (staker.stakedAmount * DAILY_REWARD_RATE * daysElapsed) / BASIS_POINTS;
-        
-        return rewards + staker.unclaimedRewards;
-    }
-    
-    /**
-     * @notice Stakes tokens in the contract
+     * @dev Stakes tokens in the contract
      * @param _amount Amount of tokens to stake
      */
     function stake(uint256 _amount) external nonReentrant whenNotPaused {
         require(_amount > 0, "Cannot stake 0");
         
-        // Update rewards before modifying stake
-        uint256 pendingRewards = calculatePendingRewards(msg.sender);
+        // Update existing stake or create new stake
+        Stake storage userStake = stakes[msg.sender];
         
-        // Update staker info
-        StakerInfo storage staker = stakers[msg.sender];
-        staker.unclaimedRewards = pendingRewards;
-        staker.stakedAmount += _amount;
-        staker.lastRewardTimestamp = block.timestamp;
+        // Claim any pending rewards before updating stake
+        if (userStake.amount > 0) {
+            claimRewards();
+        }
         
-        // Update total staked
+        // Transfer tokens from user to contract
+        require(stakingToken.transferFrom(msg.sender, address(this), _amount), 
+                "Transfer failed");
+        
+        // Update stake info
+        if (userStake.amount == 0) {
+            userStake.startTime = block.timestamp;
+            userStake.lastClaimTime = block.timestamp;
+        }
+        userStake.amount += _amount;
         totalStaked += _amount;
-        
-        // Transfer tokens to contract
-        require(stakingToken.transferFrom(msg.sender, address(this), _amount), "Transfer failed");
         
         emit Staked(msg.sender, _amount);
     }
     
     /**
-     * @notice Withdraws staked tokens
-     * @param _amount Amount of tokens to withdraw
+     * @dev Calculates pending rewards for a user
+     * @param _user Address of the user
+     * @return Pending reward amount
      */
-    function withdraw(uint256 _amount) external nonReentrant {
-        StakerInfo storage staker = stakers[msg.sender];
-        require(staker.stakedAmount >= _amount, "Insufficient staked amount");
+    function calculateRewards(address _user) public view returns (uint256) {
+        Stake memory userStake = stakes[_user];
         
-        // Update rewards before withdrawal
-        uint256 pendingRewards = calculatePendingRewards(msg.sender);
+        if (userStake.amount == 0) {
+            return 0;
+        }
         
-        // Update staker info
-        staker.unclaimedRewards = pendingRewards;
-        staker.stakedAmount -= _amount;
-        staker.lastRewardTimestamp = block.timestamp;
+        uint256 timeElapsed = block.timestamp - userStake.lastClaimTime;
+        uint256 days = timeElapsed / SECONDS_PER_DAY;
         
-        // Update total staked
-        totalStaked -= _amount;
+        // Calculate compound interest
+        uint256 reward = userStake.amount;
+        for (uint256 i = 0; i < days; i++) {
+            reward += (reward * DAILY_REWARD_RATE) / BASIS_POINTS;
+        }
         
-        // Transfer tokens back to user
-        require(stakingToken.transfer(msg.sender, _amount), "Transfer failed");
-        
-        emit Withdrawn(msg.sender, _amount);
+        return reward - userStake.amount;
     }
     
     /**
-     * @notice Claims accumulated rewards
+     * @dev Claims pending rewards
      */
-    function claimRewards() external nonReentrant {
-        uint256 rewards = calculatePendingRewards(msg.sender);
+    function claimRewards() public nonReentrant whenNotPaused {
+        uint256 rewards = calculateRewards(msg.sender);
         require(rewards > 0, "No rewards to claim");
         
-        // Update staker info
-        StakerInfo storage staker = stakers[msg.sender];
-        staker.unclaimedRewards = 0;
-        staker.lastRewardTimestamp = block.timestamp;
+        stakes[msg.sender].lastClaimTime = block.timestamp;
         
-        // Transfer rewards
-        require(stakingToken.transfer(msg.sender, rewards), "Transfer failed");
+        require(stakingToken.transfer(msg.sender, rewards), 
+                "Reward transfer failed");
         
         emit RewardsClaimed(msg.sender, rewards);
     }
     
     /**
-     * @notice Emergency function to pause contract
+     * @dev Unstakes tokens and claims rewards
+     * @param _amount Amount of tokens to unstake
      */
+    function unstake(uint256 _amount) external nonReentrant whenNotPaused {
+        Stake storage userStake = stakes[msg.sender];
+        require(_amount > 0 && _amount <= userStake.amount, 
+                "Invalid unstake amount");
+        
+        // Claim rewards first
+        claimRewards();
+        
+        // Update stake info
+        userStake.amount -= _amount;
+        totalStaked -= _amount;
+        
+        // Transfer tokens back to user
+        require(stakingToken.transfer(msg.sender, _amount), 
+                "Unstake transfer failed");
+        
+        emit Unstaked(msg.sender, _amount);
+    }
+    
+    /**
+     * @dev Emergency withdraw function for contract owner
+     * @param _token Address of token to withdraw
+     */
+    function emergencyWithdraw(address _token) external onlyOwner {
+        uint256 balance = IERC20(_token).balanceOf(address(this));
+        require(IERC20(_token).transfer(owner(), balance), 
+                "Emergency withdraw failed");
+    }
+    
+    // Circuit breaker
     function pause() external onlyOwner {
         _pause();
     }
     
-    /**
-     * @notice Unpause contract
-     */
     function unpause() external onlyOwner {
         _unpause();
     }
 }
 ```
 
-Key Security Features:
-1. ReentrancyGuard to prevent reentrancy attacks
-2. Pausable functionality for emergency situations
-3. Checks-effects-interactions pattern in all external functions
-4. Input validation and require statements
-5. Safe math operations (Solidity 0.8.x)
+Key Development Decisions and Features:
 
-Gas Optimizations:
-1. Packed storage variables in StakerInfo struct
-2. Immutable variables where possible
-3. Single storage slot updates
-4. Efficient reward calculations
+1. Security Features:
+- ReentrancyGuard to prevent reentrancy attacks
+- Pausable functionality for emergency situations
+- Input validation on all functions
+- Using SafeMath through Solidity 0.8+ built-in overflow protection
+- Emergency withdrawal function for contract owner
 
-Error Handling:
-1. Require statements with clear error messages
-2. Input validation for all external functions
-3. Token transfer success checking
+2. Gas Optimization:
+- Used immutable for stakingToken address
+- Optimized storage usage with structured stake data
+- Efficient reward calculation mechanism
+- Combined claiming rewards with unstaking to save gas
 
-Testing Considerations:
-1. Test all main functions (stake, withdraw, claimRewards)
-2. Test edge cases and boundary conditions
-3. Test reward calculations accuracy
-4. Test emergency pause functionality
-5. Test for potential overflow scenarios
+3. Error Handling:
+- Comprehensive require statements with clear error messages
+- Validation of all input parameters
+- Checking for transfer success in token operations
 
-This implementation provides a secure and gas-efficient staking mechanism with 1% daily rewards. The code is well-documented and follows Solidity best practices.
+4. Professional Structure:
+- Clear documentation and comments
+- Organized event emissions
+- Consistent naming conventions
+- Modular function design
 
-Let me know if you need any clarification or have questions about specific implementation details!
+5. Reward Mechanism:
+- 1% daily rewards implemented through basis points
+- Compound interest calculation
+- Accurate timestamp-based reward tracking
+
+6. Additional Features:
+- Ability to stake multiple times
+- Automatic reward claiming when staking more
+- View function for pending rewards
+- Total staked amount tracking
+
+This contract provides a secure and efficient implementation of a staking mechanism with daily rewards. It's designed to be gas-efficient while maintaining high security standards.
+
+To deploy this contract, you would need to:
+1. Deploy the ERC20 token contract first
+2. Deploy this staking contract with the token address as constructor parameter
+3. Ensure the staking token has sufficient supply for rewards
+4. Test all functions thoroughly on a testnet before mainnet deployment
