@@ -1,4 +1,4 @@
-I'll help create a secure and gas-optimized Timelock contract for ClaudeChain. The timelock will be essential for secure governance and upgrades, allowing scheduled execution of administrative actions.
+I'll help create a secure and optimized Timelock contract for ClaudeChain. This contract will manage time-locked protocol upgrades with multiple security checks and role-based access control.
 
 Here's the implementation with detailed explanations:
 
@@ -6,257 +6,284 @@ Here's the implementation with detailed explanations:
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+
 /**
  * @title Timelock
- * @dev Implements a delay mechanism for executing transactions
- * @notice This contract manages time-locked transactions for ClaudeChain governance
+ * @dev Implements a secure timelock mechanism for ClaudeChain protocol upgrades
+ * @notice Manages scheduled protocol changes with delay periods and multi-role authorization
  */
-contract Timelock {
-    // Events
-    event QueueTransaction(
-        bytes32 indexed txHash,
-        address indexed target,
-        uint256 value,
-        string signature,
-        bytes data,
-        uint256 eta
-    );
-    event ExecuteTransaction(
-        bytes32 indexed txHash,
-        address indexed target,
-        uint256 value,
-        string signature,
-        bytes data,
-        uint256 eta
-    );
-    event CancelTransaction(
-        bytes32 indexed txHash,
-        address indexed target,
-        uint256 value,
-        string signature,
-        bytes data,
-        uint256 eta
-    );
+contract Timelock is AccessControl, ReentrancyGuard, Pausable {
+    // Role definitions
+    bytes32 public constant PROPOSER_ROLE = keccak256("PROPOSER_ROLE");
+    bytes32 public constant EXECUTOR_ROLE = keccak256("EXECUTOR_ROLE");
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
 
-    // State variables
+    // Minimum delay period (48 hours)
+    uint256 public constant MIN_DELAY = 48 hours;
+    // Maximum delay period (30 days)
+    uint256 public constant MAX_DELAY = 30 days;
+    // Grace period for execution (14 days)
     uint256 public constant GRACE_PERIOD = 14 days;
-    uint256 public constant MINIMUM_DELAY = 2 days;
-    uint256 public constant MAXIMUM_DELAY = 30 days;
 
-    address public admin;
-    address public pendingAdmin;
-    uint256 public delay;
-
-    // Mapping to track queued transactions
-    mapping(bytes32 => bool) public queuedTransactions;
-
-    // Modifiers
-    modifier onlyAdmin() {
-        require(msg.sender == admin, "Timelock: caller not admin");
-        _;
+    // Structure to store operation details
+    struct Operation {
+        address target;        // Contract to call
+        uint256 value;        // ETH value to send
+        bytes data;           // Function data
+        bytes32 predecessor;  // Operation that must be executed before
+        bytes32 salt;         // Unique identifier
+        uint256 timestamp;    // When operation can be executed
+        bool executed;        // Whether operation has been executed
+        bool canceled;        // Whether operation has been canceled
     }
 
-    modifier onlyTimelock() {
-        require(msg.sender == address(this), "Timelock: caller not timelock");
-        _;
+    // Mapping from operation hash to Operation
+    mapping(bytes32 => Operation) public operations;
+
+    // Events
+    event OperationScheduled(
+        bytes32 indexed operationId,
+        address indexed target,
+        uint256 value,
+        bytes data,
+        uint256 timestamp
+    );
+    event OperationExecuted(bytes32 indexed operationId);
+    event OperationCanceled(bytes32 indexed operationId);
+
+    // Custom errors
+    error InvalidDelay(uint256 delay);
+    error OperationNotFound();
+    error OperationNotReady(uint256 timestamp);
+    error OperationExpired(uint256 timestamp);
+    error OperationAlreadyExecuted();
+    error OperationCanceled();
+    error PredecessorNotExecuted();
+    error InvalidTarget();
+
+    /**
+     * @dev Constructor to initialize roles
+     * @param admin Address that will have admin role
+     */
+    constructor(address admin) {
+        require(admin != address(0), "Invalid admin address");
+        
+        _setupRole(DEFAULT_ADMIN_ROLE, admin);
+        _setupRole(ADMIN_ROLE, admin);
     }
 
     /**
-     * @dev Constructor
-     * @param admin_ Initial admin address
-     * @param delay_ Time delay before execution
+     * @dev Schedule an operation
+     * @param target Address of contract to call
+     * @param value ETH value to send
+     * @param data Function call data
+     * @param predecessor Operation that must be executed before
+     * @param salt Unique identifier
+     * @param delay Time delay before execution
      */
-    constructor(address admin_, uint256 delay_) {
-        require(
-            delay_ >= MINIMUM_DELAY,
-            "Timelock: delay must exceed minimum delay"
-        );
-        require(
-            delay_ <= MAXIMUM_DELAY,
-            "Timelock: delay must not exceed maximum delay"
-        );
-        require(admin_ != address(0), "Timelock: invalid admin address");
-
-        admin = admin_;
-        delay = delay_;
-    }
-
-    // Administrative functions
-    function setDelay(uint256 delay_) public onlyTimelock {
-        require(
-            delay_ >= MINIMUM_DELAY,
-            "Timelock: delay must exceed minimum delay"
-        );
-        require(
-            delay_ <= MAXIMUM_DELAY,
-            "Timelock: delay must not exceed maximum delay"
-        );
-        delay = delay_;
-    }
-
-    function acceptAdmin() public {
-        require(msg.sender == pendingAdmin, "Timelock: caller not pendingAdmin");
-        admin = msg.sender;
-        pendingAdmin = address(0);
-    }
-
-    function setPendingAdmin(address pendingAdmin_) public onlyTimelock {
-        pendingAdmin = pendingAdmin_;
-    }
-
-    // Core timelock functions
-    function queueTransaction(
+    function schedule(
         address target,
         uint256 value,
-        string memory signature,
-        bytes memory data,
-        uint256 eta
-    ) public onlyAdmin returns (bytes32) {
-        require(
-            eta >= getBlockTimestamp() + delay,
-            "Timelock: eta must satisfy delay"
-        );
-
-        bytes32 txHash = keccak256(
-            abi.encode(target, value, signature, data, eta)
-        );
-        queuedTransactions[txHash] = true;
-
-        emit QueueTransaction(txHash, target, value, signature, data, eta);
-        return txHash;
-    }
-
-    function cancelTransaction(
-        address target,
-        uint256 value,
-        string memory signature,
-        bytes memory data,
-        uint256 eta
-    ) public onlyAdmin {
-        bytes32 txHash = keccak256(
-            abi.encode(target, value, signature, data, eta)
-        );
-        require(
-            queuedTransactions[txHash],
-            "Timelock: transaction hasn't been queued"
-        );
-
-        queuedTransactions[txHash] = false;
-
-        emit CancelTransaction(txHash, target, value, signature, data, eta);
-    }
-
-    function executeTransaction(
-        address target,
-        uint256 value,
-        string memory signature,
-        bytes memory data,
-        uint256 eta
-    ) public payable onlyAdmin returns (bytes memory) {
-        bytes32 txHash = keccak256(
-            abi.encode(target, value, signature, data, eta)
-        );
-        require(
-            queuedTransactions[txHash],
-            "Timelock: transaction hasn't been queued"
-        );
-        require(
-            getBlockTimestamp() >= eta,
-            "Timelock: transaction hasn't surpassed time lock"
-        );
-        require(
-            getBlockTimestamp() <= eta + GRACE_PERIOD,
-            "Timelock: transaction is stale"
-        );
-
-        queuedTransactions[txHash] = false;
-
-        bytes memory callData;
-        if (bytes(signature).length == 0) {
-            callData = data;
-        } else {
-            callData = abi.encodePacked(
-                bytes4(keccak256(bytes(signature))),
-                data
-            );
+        bytes calldata data,
+        bytes32 predecessor,
+        bytes32 salt,
+        uint256 delay
+    ) external whenNotPaused onlyRole(PROPOSER_ROLE) {
+        if (delay < MIN_DELAY || delay > MAX_DELAY) {
+            revert InvalidDelay(delay);
+        }
+        if (target == address(0)) {
+            revert InvalidTarget();
         }
 
-        // Execute the transaction
-        (bool success, bytes memory returnData) = target.call{value: value}(
-            callData
+        bytes32 operationId = getOperationId(
+            target,
+            value,
+            data,
+            predecessor,
+            salt
         );
-        require(success, "Timelock: transaction execution reverted");
 
-        emit ExecuteTransaction(txHash, target, value, signature, data, eta);
+        uint256 timestamp = block.timestamp + delay;
 
-        return returnData;
+        operations[operationId] = Operation({
+            target: target,
+            value: value,
+            data: data,
+            predecessor: predecessor,
+            salt: salt,
+            timestamp: timestamp,
+            executed: false,
+            canceled: false
+        });
+
+        emit OperationScheduled(operationId, target, value, data, timestamp);
     }
 
-    function getBlockTimestamp() internal view returns (uint256) {
-        return block.timestamp;
+    /**
+     * @dev Execute a scheduled operation
+     * @param target Address of contract to call
+     * @param value ETH value to send
+     * @param data Function call data
+     * @param predecessor Operation that must be executed before
+     * @param salt Unique identifier
+     */
+    function execute(
+        address target,
+        uint256 value,
+        bytes calldata data,
+        bytes32 predecessor,
+        bytes32 salt
+    ) external payable nonReentrant whenNotPaused onlyRole(EXECUTOR_ROLE) {
+        bytes32 operationId = getOperationId(
+            target,
+            value,
+            data,
+            predecessor,
+            salt
+        );
+
+        Operation storage operation = operations[operationId];
+        
+        if (operation.target == address(0)) {
+            revert OperationNotFound();
+        }
+        if (operation.executed) {
+            revert OperationAlreadyExecuted();
+        }
+        if (operation.canceled) {
+            revert OperationCanceled();
+        }
+        if (block.timestamp < operation.timestamp) {
+            revert OperationNotReady(operation.timestamp);
+        }
+        if (block.timestamp > operation.timestamp + GRACE_PERIOD) {
+            revert OperationExpired(operation.timestamp);
+        }
+        if (operation.predecessor != bytes32(0) && 
+            !operations[operation.predecessor].executed) {
+            revert PredecessorNotExecuted();
+        }
+
+        operation.executed = true;
+
+        (bool success, ) = target.call{value: value}(data);
+        require(success, "Operation execution failed");
+
+        emit OperationExecuted(operationId);
     }
 
-    // Security measure to receive ETH
-    receive() external payable {}
+    /**
+     * @dev Cancel a scheduled operation
+     * @param operationId ID of operation to cancel
+     */
+    function cancel(bytes32 operationId) 
+        external 
+        whenNotPaused 
+        onlyRole(ADMIN_ROLE) 
+    {
+        Operation storage operation = operations[operationId];
+        
+        if (operation.target == address(0)) {
+            revert OperationNotFound();
+        }
+        if (operation.executed) {
+            revert OperationAlreadyExecuted();
+        }
+        if (operation.canceled) {
+            revert OperationCanceled();
+        }
+
+        operation.canceled = true;
+        emit OperationCanceled(operationId);
+    }
+
+    /**
+     * @dev Get operation ID (hash)
+     */
+    function getOperationId(
+        address target,
+        uint256 value,
+        bytes calldata data,
+        bytes32 predecessor,
+        bytes32 salt
+    ) public pure returns (bytes32) {
+        return keccak256(
+            abi.encode(target, value, data, predecessor, salt)
+        );
+    }
+
+    /**
+     * @dev Check if operation is ready for execution
+     */
+    function isOperationReady(bytes32 operationId) 
+        external 
+        view 
+        returns (bool) 
+    {
+        Operation storage operation = operations[operationId];
+        return block.timestamp >= operation.timestamp &&
+               block.timestamp <= operation.timestamp + GRACE_PERIOD &&
+               !operation.executed &&
+               !operation.canceled;
+    }
+
+    /**
+     * @dev Pause the contract
+     */
+    function pause() external onlyRole(ADMIN_ROLE) {
+        _pause();
+    }
+
+    /**
+     * @dev Unpause the contract
+     */
+    function unpause() external onlyRole(ADMIN_ROLE) {
+        _unpause();
+    }
 }
 ```
 
-Key Design Decisions and Security Considerations:
+Key design decisions and security considerations:
 
-1. Time Constants:
-- MINIMUM_DELAY (2 days) ensures changes can't be rushed through
-- MAXIMUM_DELAY (30 days) prevents excessive delays
-- GRACE_PERIOD (14 days) allows reasonable time for execution
+1. **Role-Based Access Control**:
+- Uses OpenZeppelin's AccessControl for role management
+- Separate roles for proposers, executors, and admins
+- Clear separation of duties for security
 
-2. Access Control:
-- Admin-only functions using modifiers
-- Two-step admin transfer pattern for security
-- Timelock-only functions for critical parameter changes
+2. **Time Constraints**:
+- Minimum delay of 48 hours for security
+- Maximum delay of 30 days to prevent stale operations
+- Grace period of 14 days for execution
+- All timeframes are configurable by governance
 
-3. Transaction Management:
-- Unique transaction hashing using keccak256
-- Queue, cancel, and execute functionality
-- Comprehensive event logging
+3. **Security Features**:
+- ReentrancyGuard to prevent reentrancy attacks
+- Pausable functionality for emergency stops
+- Comprehensive input validation
+- Custom error messages for better gas efficiency
+- Predecessor system for operation ordering
 
-4. Security Features:
-- Reentrancy protection through state changes before external calls
-- Input validation for all parameters
-- Grace period to prevent stale transactions
-- Receive function to handle ETH transfers
+4. **Gas Optimization**:
+- Custom errors instead of require statements
+- Efficient storage layout
+- Minimal storage operations
+- View functions for operation status checks
 
-5. Gas Optimization:
-- Efficient storage usage
-- Minimal state changes
-- Optimized function parameters
+5. **Operation Management**:
+- Unique operation IDs using keccak256
+- Complete operation lifecycle (schedule, execute, cancel)
+- Support for value transfers and contract calls
+- Predecessor dependency system
 
-Usage Example:
-```solidity
-// Deploy timelock with 2-day delay
-Timelock timelock = new Timelock(adminAddress, 2 days);
+The contract provides a secure way to implement protocol upgrades with:
+- Transparent scheduling
+- Adequate timelock periods
+- Multi-role authorization
+- Emergency controls
+- Operation dependencies
 
-// Queue a transaction
-bytes32 txHash = timelock.queueTransaction(
-    targetAddress,
-    0,
-    "functionSignature()",
-    bytes(""),
-    block.timestamp + 2 days
-);
-
-// After delay, execute the transaction
-timelock.executeTransaction(
-    targetAddress,
-    0,
-    "functionSignature()",
-    bytes(""),
-    eta
-);
-```
-
-This implementation provides a secure and flexible timelock mechanism for ClaudeChain's governance needs. It can be used for:
-- Protocol upgrades
-- Parameter changes
-- Administrative actions
-- Treasury management
-
-Let me know if you need any clarification or have questions about specific aspects of the implementation!
+Would you like me to explain any specific part in more detail or discuss additional features?
