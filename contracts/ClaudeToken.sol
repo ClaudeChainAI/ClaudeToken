@@ -1,142 +1,95 @@
-I'll help create the ClaudeToken.sol contract with a focus on security, optimization, and best practices. Let's break this down into steps:
+I'll help you develop the ClaudeToken smart contract with a focus on security, efficiency, and best practices. Let's break this down step by step.
 
 ```solidity
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.17;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title ClaudeToken
- * @dev Implementation of the ClaudeToken for ClaudeChain
- * 
- * Enhanced ERC20 token with:
- * - Burning capability
- * - Pausable transfers
- * - Anti-flash loan protection
- * - Rate limiting for large transfers
+ * @dev Implementation of the ClaudeToken, an enhanced ERC20 token for ClaudeChain
+ * @author Claude AI Developer
  */
-contract ClaudeToken is ERC20, ERC20Burnable, Pausable, Ownable, ReentrancyGuard {
-    // Constants
-    uint256 private constant INITIAL_SUPPLY = 1_000_000_000 * 10**18; // 1 billion tokens
-    uint256 private constant TRANSFER_COOLDOWN = 1 hours;
-    uint256 private constant LARGE_TRANSFER_THRESHOLD = 100_000 * 10**18; // 100,000 tokens
-
-    // State variables
-    mapping(address => uint256) private _lastTransferTimestamp;
-    mapping(address => bool) private _isExemptFromLimits;
+contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, ReentrancyGuard {
+    // Role definitions
+    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+    
+    // Token parameters
+    uint256 public constant INITIAL_SUPPLY = 1_000_000_000 * 10**18; // 1 billion tokens
+    uint256 public constant MAX_SUPPLY = 2_000_000_000 * 10**18; // 2 billion tokens
     
     // Events
-    event RateLimitConfigured(address indexed account, bool isExempt);
-    event LargeTransfer(address indexed from, address indexed to, uint256 amount);
+    event MinterAdded(address indexed account);
+    event MinterRemoved(address indexed account);
+    event TokensMinted(address indexed to, uint256 amount);
+    event TokensBurned(address indexed from, uint256 amount);
 
     /**
-     * @dev Constructor that gives msg.sender all of existing tokens.
+     * @dev Constructor that gives msg.sender all existing tokens.
      */
     constructor() ERC20("ClaudeToken", "CLAUDE") {
+        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _setupRole(MINTER_ROLE, msg.sender);
+        _setupRole(PAUSER_ROLE, msg.sender);
+        
+        // Mint initial supply to contract deployer
         _mint(msg.sender, INITIAL_SUPPLY);
-        _isExemptFromLimits[msg.sender] = true;
     }
 
     /**
-     * @dev Pauses all token transfers.
-     * Can only be called by the contract owner.
+     * @dev Mint new tokens
+     * @param to The address that will receive the minted tokens
+     * @param amount The amount of tokens to mint
      */
-    function pause() public onlyOwner {
-        _pause();
+    function mint(address to, uint256 amount) 
+        external 
+        onlyRole(MINTER_ROLE) 
+        nonReentrant 
+        whenNotPaused 
+    {
+        require(to != address(0), "Cannot mint to zero address");
+        require(totalSupply() + amount <= MAX_SUPPLY, "Would exceed max supply");
+        
+        _mint(to, amount);
+        emit TokensMinted(to, amount);
     }
 
     /**
-     * @dev Unpauses all token transfers.
-     * Can only be called by the contract owner.
+     * @dev Override burn function to add custom logic
+     * @param amount The amount of tokens to burn
      */
-    function unpause() public onlyOwner {
-        _unpause();
-    }
-
-    /**
-     * @dev Configures rate limit exemption for an account
-     * @param account Address to configure
-     * @param exempt Whether the account should be exempt from limits
-     */
-    function configureRateLimit(address account, bool exempt) external onlyOwner {
-        require(account != address(0), "Invalid address");
-        _isExemptFromLimits[account] = exempt;
-        emit RateLimitConfigured(account, exempt);
-    }
-
-    /**
-     * @dev Override of the transfer function to add rate limiting
-     * and large transfer protection
-     */
-    function transfer(address to, uint256 amount) 
+    function burn(uint256 amount) 
         public 
         virtual 
         override 
         whenNotPaused 
-        nonReentrant 
-        returns (bool)
     {
-        require(to != address(0), "Transfer to zero address");
-        require(amount > 0, "Transfer amount must be positive");
-
-        if (!_isExemptFromLimits[msg.sender]) {
-            _enforceRateLimit(msg.sender, amount);
-        }
-
-        if (amount >= LARGE_TRANSFER_THRESHOLD) {
-            emit LargeTransfer(msg.sender, to, amount);
-        }
-
-        _lastTransferTimestamp[msg.sender] = block.timestamp;
-        return super.transfer(to, amount);
+        super.burn(amount);
+        emit TokensBurned(_msgSender(), amount);
     }
 
     /**
-     * @dev Override of the transferFrom function to add rate limiting
-     * and large transfer protection
+     * @dev Pause token transfers
      */
-    function transferFrom(address from, address to, uint256 amount)
-        public
-        virtual
-        override
-        whenNotPaused
-        nonReentrant
-        returns (bool)
-    {
-        require(to != address(0), "Transfer to zero address");
-        require(amount > 0, "Transfer amount must be positive");
-
-        if (!_isExemptFromLimits[from]) {
-            _enforceRateLimit(from, amount);
-        }
-
-        if (amount >= LARGE_TRANSFER_THRESHOLD) {
-            emit LargeTransfer(from, to, amount);
-        }
-
-        _lastTransferTimestamp[from] = block.timestamp;
-        return super.transferFrom(from, to, amount);
+    function pause() external onlyRole(PAUSER_ROLE) {
+        _pause();
     }
 
     /**
-     * @dev Internal function to enforce rate limiting
+     * @dev Unpause token transfers
      */
-    function _enforceRateLimit(address from, uint256 amount) internal view {
-        if (_lastTransferTimestamp[from] != 0) {
-            require(
-                block.timestamp >= _lastTransferTimestamp[from] + TRANSFER_COOLDOWN,
-                "Transfer cooldown active"
-            );
-        }
+    function unpause() external onlyRole(PAUSER_ROLE) {
+        _unpause();
     }
 
     /**
-     * @dev Override of the _beforeTokenTransfer function to add pause functionality
+     * @dev Override transfer function to add pause functionality
      */
     function _beforeTokenTransfer(
         address from,
@@ -145,45 +98,73 @@ contract ClaudeToken is ERC20, ERC20Burnable, Pausable, Ownable, ReentrancyGuard
     ) internal virtual override whenNotPaused {
         super._beforeTokenTransfer(from, to, amount);
     }
+
+    /**
+     * @dev Returns true if the contract is paused, and false otherwise.
+     */
+    function isPaused() external view returns (bool) {
+        return paused();
+    }
+
+    /**
+     * @dev Returns the number of decimal places
+     */
+    function decimals() public pure override returns (uint8) {
+        return 18;
+    }
 }
 ```
 
-Key design decisions and features:
+Key Design Decisions and Features:
 
-1. **Security Features**:
-- Using OpenZeppelin's battle-tested contracts as base
-- Implementing ReentrancyGuard for transfer functions
-- Pausable functionality for emergency situations
-- Rate limiting to prevent market manipulation
-- Large transfer monitoring
+1. Security Features:
+- Used OpenZeppelin's battle-tested contracts as base
+- Implemented AccessControl for role-based permissions
+- Added ReentrancyGuard to prevent reentrancy attacks
+- Included Pausable functionality for emergency situations
+- Careful validation of parameters and addresses
 
-2. **Gas Optimization**:
-- Efficient use of storage variables
-- Minimal state changes
-- Using immutable for constants
-- Optimized require statements
+2. Gas Optimization:
+- Used constant values for fixed parameters
+- Optimized variable types
+- Minimal storage usage
+- Efficient function modifiers
 
-3. **Enhanced Functionality**:
-- Rate limiting system with cooldown periods
-- Exemption list for certain addresses
-- Large transfer monitoring
-- Burning capability
+3. Enhanced Functionality:
+- Role-based minting capabilities
+- Maximum supply cap
+- Burning mechanism
+- Pause/unpause functionality
+- Detailed events for tracking
 
-4. **Error Handling**:
-- Comprehensive input validation
+4. Error Handling:
+- Comprehensive require statements
 - Clear error messages
-- Proper access control checks
+- Role validation
+- Supply cap checks
 
-5. **Professional Structure**:
-- Clear documentation
-- Logical grouping of functions
-- Event emission for important state changes
-- Consistent naming conventions
+5. Additional Features:
+- Custom events for better tracking
+- View functions for contract state
+- Override capabilities for key functions
 
 To deploy this contract:
-1. Install OpenZeppelin dependencies
-2. Compile with Solidity 0.8.19 or later
-3. Deploy with initial parameters
-4. Configure exempt addresses as needed
 
-This implementation provides a solid foundation for ClaudeChain's token while maintaining security and efficiency. Would you like me to explain any particular aspect in more detail?
+1. Install dependencies:
+```bash
+npm install @openzeppelin/contracts
+```
+
+2. Deploy parameters:
+- Initial supply: 1 billion tokens
+- Maximum supply: 2 billion tokens
+- Token name: "ClaudeToken"
+- Token symbol: "CLAUDE"
+
+The contract can be extended with additional features in future phases:
+- Token vesting
+- Governance functionality
+- Staking mechanisms
+- Cross-chain capabilities
+
+Would you like me to explain any specific part in more detail or add any additional features?
