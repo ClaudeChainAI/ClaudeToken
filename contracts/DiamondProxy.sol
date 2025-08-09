@@ -1,52 +1,55 @@
-I'll help create a secure and optimized DiamondProxy implementation following the EIP-2535 Diamond Standard. I'll break this down into steps and explain key decisions.
+I'll help create a secure and optimized Diamond Proxy implementation following EIP-2535. I'll break this down into logical steps and explain key decisions.
+
+First, let's create the DiamondProxy.sol contract:
 
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
+
+import "@openzeppelin/contracts/utils/Address.sol";
+import "@openzeppelin/contracts/utils/StorageSlot.sol";
 
 /**
  * @title DiamondProxy
  * @dev Implementation of the Diamond Standard (EIP-2535)
  * @notice This contract acts as a proxy that delegates calls to facets (implementation contracts)
  */
-
-interface IDiamondCut {
-    enum FacetCutAction {Add, Replace, Remove}
-    
-    struct FacetCut {
-        address facetAddress;
-        FacetCutAction action;
-        bytes4[] functionSelectors;
-    }
-
-    event DiamondCut(FacetCut[] _diamondCut, address _init, bytes _calldata);
-}
-
 contract DiamondProxy {
+    using Address for address;
+
+    // Diamond Cut event as per EIP-2535
+    event DiamondCut(FacetCut[] _diamondCut, address _init, bytes _calldata);
+
     // Storage position of the owner of the contract
     bytes32 constant DIAMOND_STORAGE_POSITION = keccak256("diamond.standard.diamond.storage");
 
-    struct FacetAddressAndPosition {
+    // Struct defining a facet cut
+    struct FacetCut {
         address facetAddress;
-        uint96 functionSelectorPosition; // position in functionSelectors array
+        uint8 action;
+        bytes4[] functionSelectors;
     }
 
+    // Possible actions for a facet cut
+    enum FacetCutAction {
+        Add,
+        Replace,
+        Remove
+    }
+
+    // Storage structure for diamond
     struct DiamondStorage {
-        // maps function selector to the facet address and position in selectors array
-        mapping(bytes4 => FacetAddressAndPosition) selectorToFacetAndPosition;
-        // array of function selectors supported by the contract
-        bytes4[] functionSelectors;
-        // used to query if a contract implements an interface
-        mapping(bytes4 => bool) supportedInterfaces;
-        // owner of the contract
+        // Maps function selector to the facet address and position in facetFunctionSelectors
+        mapping(bytes4 => address) selectorToFacetAndPosition;
+        // Maps facet addresses to function selectors
+        mapping(address => bytes4[]) facetFunctionSelectors;
+        // Owner of the contract
         address contractOwner;
     }
 
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-
     /**
      * @dev Internal function to get diamond storage
-     * @return ds DiamondStorage struct from a specific position in contract storage
+     * @return ds The diamond storage struct
      */
     function diamondStorage() internal pure returns (DiamondStorage storage ds) {
         bytes32 position = DIAMOND_STORAGE_POSITION;
@@ -55,21 +58,23 @@ contract DiamondProxy {
         }
     }
 
-    constructor(address _owner) {
-        require(_owner != address(0), "Invalid owner address");
+    /**
+     * @dev Constructor that sets the contract owner
+     */
+    constructor() {
         DiamondStorage storage ds = diamondStorage();
-        ds.contractOwner = _owner;
-        emit OwnershipTransferred(address(0), _owner);
+        ds.contractOwner = msg.sender;
     }
 
     /**
      * @dev Fallback function that delegates calls to facets
      */
-    fallback() external payable virtual {
+    fallback() external payable {
         DiamondStorage storage ds = diamondStorage();
-        address facet = ds.selectorToFacetAndPosition[msg.sig].facetAddress;
+        address facet = ds.selectorToFacetAndPosition[msg.sig];
+        
         require(facet != address(0), "Diamond: Function does not exist");
-
+        
         assembly {
             calldatacopy(0, 0, calldatasize())
             let result := delegatecall(gas(), facet, 0, calldatasize(), 0, 0)
@@ -84,79 +89,86 @@ contract DiamondProxy {
         }
     }
 
-    receive() external payable {} // Required to receive ETH
-
     /**
-     * @dev Adds/replaces/removes facet functions
-     * @param _diamondCut Contains the facet addresses and function selectors
-     * @param _init The address of the contract to execute _calldata
-     * @param _calldata A function call, including function selector and arguments
+     * @dev Cuts new facets into the diamond
+     * @param _diamondCut Array of FacetCut structs
+     * @param _init Address of the initialization contract
+     * @param _calldata Initialization function call data
      */
     function diamondCut(
-        IDiamondCut.FacetCut[] memory _diamondCut,
+        FacetCut[] memory _diamondCut,
         address _init,
         bytes memory _calldata
     ) external {
-        require(msg.sender == diamondStorage().contractOwner, "Not contract owner");
+        DiamondStorage storage ds = diamondStorage();
+        require(msg.sender == ds.contractOwner, "Diamond: Must be contract owner");
+        
         for (uint256 i; i < _diamondCut.length; i++) {
-            IDiamondCut.FacetCutAction action = _diamondCut[i].action;
-            if (action == IDiamondCut.FacetCutAction.Add) {
-                addFunctions(_diamondCut[i].facetAddress, _diamondCut[i].functionSelectors);
-            } else if (action == IDiamondCut.FacetCutAction.Replace) {
-                replaceFunctions(_diamondCut[i].facetAddress, _diamondCut[i].functionSelectors);
-            } else if (action == IDiamondCut.FacetCutAction.Remove) {
-                removeFunctions(_diamondCut[i].facetAddress, _diamondCut[i].functionSelectors);
+            FacetCut memory cut = _diamondCut[i];
+            
+            if (cut.action == uint8(FacetCutAction.Add)) {
+                addFunctions(cut.facetAddress, cut.functionSelectors);
+            } else if (cut.action == uint8(FacetCutAction.Replace)) {
+                replaceFunctions(cut.facetAddress, cut.functionSelectors);
+            } else if (cut.action == uint8(FacetCutAction.Remove)) {
+                removeFunctions(cut.facetAddress, cut.functionSelectors);
+            } else {
+                revert("Diamond: Invalid action");
             }
         }
-        emit IDiamondCut.DiamondCut(_diamondCut, _init, _calldata);
+
+        emit DiamondCut(_diamondCut, _init, _calldata);
+
         if (_init != address(0)) {
-            require(_init.code.length > 0, "Init contract has no code");
-            (bool success,) = _init.delegatecall(_calldata);
-            require(success, "Init function reverted");
+            require(_init.isContract(), "Diamond: Init address has no code");
+            (bool success, ) = _init.delegatecall(_calldata);
+            require(success, "Diamond: Init function reverted");
         }
     }
 
     /**
      * @dev Adds new functions to the diamond
-     * @param _facetAddress The facet address that contains the functions
+     * @param _facetAddress Address of the facet
      * @param _selectors Function selectors to add
      */
     function addFunctions(address _facetAddress, bytes4[] memory _selectors) internal {
-        require(_facetAddress != address(0), "Add facet can't be address(0)");
         DiamondStorage storage ds = diamondStorage();
-        uint96 selectorPosition = uint96(ds.functionSelectors.length);
+        require(_facetAddress != address(0), "Diamond: Facet address cannot be zero");
+        require(_facetAddress.isContract(), "Diamond: Facet must be a contract");
         
         for (uint256 i; i < _selectors.length; i++) {
             bytes4 selector = _selectors[i];
-            require(ds.selectorToFacetAndPosition[selector].facetAddress == address(0), "Function already exists");
-            ds.functionSelectors.push(selector);
-            ds.selectorToFacetAndPosition[selector] = FacetAddressAndPosition(_facetAddress, selectorPosition);
-            selectorPosition++;
+            require(ds.selectorToFacetAndPosition[selector] == address(0), 
+                "Diamond: Function already exists");
+            
+            ds.selectorToFacetAndPosition[selector] = _facetAddress;
+            ds.facetFunctionSelectors[_facetAddress].push(selector);
         }
     }
 
-    // Additional helper functions would go here (replaceFunctions, removeFunctions)
-    // I've focused on the core functionality for brevity
+    // Additional helper functions would go here (replaceFunctions, removeFunctions, etc.)
+    // Omitted for brevity but would follow similar pattern
 }
 ```
 
-Key decisions and features:
+Key design decisions and features:
 
 1. **Storage Pattern**:
-- Used the Diamond Storage pattern to avoid storage collisions
-- Implemented a dedicated storage structure for function selectors and facet addresses
-- Used assembly for optimal gas usage in storage access
+- Used the Diamond Storage pattern for upgradeable storage
+- Implemented using a single storage slot to avoid collisions
+- Utilized mappings for efficient selector lookup
 
-2. **Security Measures**:
-- Owner authentication for critical operations
-- Checks for zero addresses
+2. **Security Features**:
+- Owner access control for diamond cuts
+- Checks for zero addresses and valid contracts
 - Validation of function selectors
-- Proper delegation pattern implementation
+- Proper delegation pattern in fallback function
 
 3. **Gas Optimization**:
+- Used assembly for low-level calls
+- Efficient storage layout
 - Minimal storage operations
-- Efficient assembly usage in fallback function
-- Optimized loops and data structures
+- Batch processing of facet cuts
 
 4. **Error Handling**:
 - Comprehensive require statements
@@ -164,14 +176,14 @@ Key decisions and features:
 - Proper revert handling in delegatecall
 
 5. **Extensibility**:
-- Modular design allowing for easy addition of new facets
-- Support for contract upgrades
-- Flexible initialization pattern
+- Supports all standard diamond cut actions (Add/Replace/Remove)
+- Allows for initialization of new facets
+- Maintains upgrade flexibility
 
 To complete the implementation, you would need to add:
 1. The replaceFunctions and removeFunctions internal functions
-2. Additional getter functions for facet information
-3. Interface support queries
-4. Events for major state changes
+2. Getter functions for facet information
+3. Additional access control mechanisms if needed
+4. Events for important state changes
 
 Would you like me to implement any of these additional components or explain any part in more detail?
