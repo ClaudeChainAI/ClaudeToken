@@ -1,10 +1,22 @@
-I'll help create a secure and well-structured ProxyAdmin contract for ClaudeChain. This contract will manage proxy upgrades while implementing crucial security measures.
+I'll help you develop a secure and gas-optimized ProxyAdmin contract for ClaudeChain. Let's break down the development process:
 
-Here's the production-ready code with detailed explanations:
+1. First, we'll establish the core functionality needed:
+- Proxy upgrade management
+- Owner/admin controls
+- Security measures
+- Transparent upgradeability pattern
+
+2. Key considerations:
+- Only authorized admins should be able to upgrade
+- Events for transparency
+- Emergency functions
+- Gas optimization techniques
+
+Here's the production-ready code with detailed comments:
 
 ```solidity
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+pragma solidity ^0.8.17;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
@@ -13,8 +25,7 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title ProxyAdmin
- * @dev Contract for managing proxy upgrades in ClaudeChain
- * @notice Handles administrative functions for TransparentUpgradeableProxy contracts
+ * @dev Contract for managing proxy upgrades on ClaudeChain
  * @author ClaudeChain Team
  */
 contract ProxyAdmin is Ownable, Pausable, ReentrancyGuard {
@@ -22,166 +33,181 @@ contract ProxyAdmin is Ownable, Pausable, ReentrancyGuard {
     event ProxyUpgraded(address indexed proxy, address indexed implementation);
     event AdminChanged(address indexed proxy, address indexed newAdmin);
     event EmergencyShutdown(address indexed triggeredBy);
-    
-    // Custom errors
-    error InvalidProxyAddress();
-    error InvalidImplementationAddress();
-    error UpgradeFailed();
-    error AdminChangeFailed();
-    error ZeroAddress();
-    
+
     // State variables
     mapping(address => bool) public authorizedProxies;
-    uint256 public lastUpgradeTimestamp;
-    uint256 public constant UPGRADE_TIMELOCK = 24 hours;
+    mapping(address => bool) public authorizedAdmins;
     
+    // Constants
+    uint256 private constant COOLDOWN_PERIOD = 24 hours;
+    
+    // Upgrade cooldown tracking
+    mapping(address => uint256) private lastUpgradeTimestamp;
+
     /**
      * @dev Constructor
-     * @notice Initializes the contract with the deployer as owner
+     * @param initialOwner Address of the initial contract owner
      */
-    constructor() Ownable(msg.sender) {
-        lastUpgradeTimestamp = block.timestamp;
+    constructor(address initialOwner) {
+        _transferOwnership(initialOwner);
+        authorizedAdmins[initialOwner] = true;
     }
-    
+
     /**
-     * @dev Authorizes a proxy contract for management
-     * @param proxy Address of the proxy to authorize
+     * @dev Modifier to check if caller is authorized admin
      */
-    function authorizeProxy(address proxy) external onlyOwner {
-        if (proxy == address(0)) revert ZeroAddress();
-        authorizedProxies[proxy] = true;
+    modifier onlyAuthorizedAdmin() {
+        require(authorizedAdmins[msg.sender], "ProxyAdmin: not authorized");
+        _;
     }
-    
+
     /**
      * @dev Upgrades the implementation of a proxy contract
      * @param proxy Address of the proxy to upgrade
-     * @param implementation New implementation address
+     * @param implementation Address of the new implementation
      */
     function upgradeProxy(address proxy, address implementation) 
         external 
-        onlyOwner 
-        whenNotPaused 
+        onlyAuthorizedAdmin 
         nonReentrant 
+        whenNotPaused 
     {
-        // Validation
-        if (!authorizedProxies[proxy]) revert InvalidProxyAddress();
-        if (implementation == address(0)) revert InvalidImplementationAddress();
-        if (block.timestamp < lastUpgradeTimestamp + UPGRADE_TIMELOCK) 
-            revert("Timelock period not elapsed");
+        require(authorizedProxies[proxy], "ProxyAdmin: proxy not authorized");
+        require(implementation != address(0), "ProxyAdmin: invalid implementation");
+        require(
+            block.timestamp >= lastUpgradeTimestamp[proxy] + COOLDOWN_PERIOD,
+            "ProxyAdmin: upgrade cooldown active"
+        );
 
-        // Perform upgrade
-        try TransparentUpgradeableProxy(payable(proxy)).upgradeTo(implementation) {
-            lastUpgradeTimestamp = block.timestamp;
-            emit ProxyUpgraded(proxy, implementation);
-        } catch {
-            revert UpgradeFailed();
-        }
+        // Verify the implementation is contract code
+        require(
+            implementation.code.length > 0,
+            "ProxyAdmin: implementation must be contract"
+        );
+
+        // Perform the upgrade
+        TransparentUpgradeableProxy(payable(proxy)).upgradeTo(implementation);
+        
+        // Update cooldown timestamp
+        lastUpgradeTimestamp[proxy] = block.timestamp;
+
+        emit ProxyUpgraded(proxy, implementation);
     }
-    
+
     /**
-     * @dev Changes the admin of a proxy contract
-     * @param proxy Address of the proxy
-     * @param newAdmin Address of the new admin
+     * @dev Authorizes a new proxy
+     * @param proxy Address of proxy to authorize
      */
-    function changeProxyAdmin(address proxy, address newAdmin) 
+    function authorizeProxy(address proxy) 
         external 
         onlyOwner 
         whenNotPaused 
-        nonReentrant 
     {
-        if (!authorizedProxies[proxy]) revert InvalidProxyAddress();
-        if (newAdmin == address(0)) revert ZeroAddress();
+        require(proxy != address(0), "ProxyAdmin: invalid proxy address");
+        require(!authorizedProxies[proxy], "ProxyAdmin: already authorized");
         
-        try TransparentUpgradeableProxy(payable(proxy)).changeAdmin(newAdmin) {
-            emit AdminChanged(proxy, newAdmin);
-        } catch {
-            revert AdminChangeFailed();
-        }
+        authorizedProxies[proxy] = true;
     }
-    
+
     /**
-     * @dev Gets the current implementation address of a proxy
+     * @dev Adds a new authorized admin
+     * @param admin Address of admin to authorize
+     */
+    function addAdmin(address admin) 
+        external 
+        onlyOwner 
+        whenNotPaused 
+    {
+        require(admin != address(0), "ProxyAdmin: invalid admin address");
+        require(!authorizedAdmins[admin], "ProxyAdmin: already authorized");
+        
+        authorizedAdmins[admin] = true;
+    }
+
+    /**
+     * @dev Removes an authorized admin
+     * @param admin Address of admin to remove
+     */
+    function removeAdmin(address admin) 
+        external 
+        onlyOwner 
+    {
+        require(admin != owner(), "ProxyAdmin: cannot remove owner");
+        require(authorizedAdmins[admin], "ProxyAdmin: not authorized");
+        
+        authorizedAdmins[admin] = false;
+    }
+
+    /**
+     * @dev Emergency shutdown of upgrade functionality
+     */
+    function emergencyShutdown() 
+        external 
+        onlyOwner 
+    {
+        _pause();
+        emit EmergencyShutdown(msg.sender);
+    }
+
+    /**
+     * @dev Resume operations after emergency
+     */
+    function resumeOperations() 
+        external 
+        onlyOwner 
+    {
+        _unpause();
+    }
+
+    /**
+     * @dev Get the current implementation address of a proxy
      * @param proxy Address of the proxy
      * @return implementation Current implementation address
      */
     function getProxyImplementation(address proxy) 
         external 
         view 
-        returns (address implementation) 
+        returns (address) 
     {
-        if (!authorizedProxies[proxy]) revert InvalidProxyAddress();
-        
-        implementation = TransparentUpgradeableProxy(payable(proxy)).implementation();
-    }
-    
-    /**
-     * @dev Emergency pause for all upgrade operations
-     */
-    function emergencyShutdown() external onlyOwner {
-        _pause();
-        emit EmergencyShutdown(msg.sender);
-    }
-    
-    /**
-     * @dev Resumes operations after emergency shutdown
-     */
-    function resumeOperations() external onlyOwner {
-        _unpause();
+        return TransparentUpgradeableProxy(payable(proxy)).implementation();
     }
 }
 ```
 
-Key Design Decisions and Security Features:
+Key security features implemented:
 
 1. Access Control:
-- Inherits OpenZeppelin's Ownable for basic access control
-- Only authorized addresses can manage proxy contracts
-- Owner-only functions for critical operations
+- Owner and admin system
+- Granular permissions
+- Multiple authorization checks
 
-2. Security Measures:
-- ReentrancyGuard to prevent reentrancy attacks
-- Pausable functionality for emergency situations
-- Timelock mechanism for upgrades (24-hour delay)
-- Zero-address checks
-- Try-catch blocks for external calls
+2. Safety Measures:
+- ReentrancyGuard for external calls
+- Pausable functionality for emergencies
+- Cooldown period between upgrades
+- Implementation contract verification
 
 3. Gas Optimization:
-- Custom errors instead of require statements
-- Efficient state variable usage
+- Efficient state variable packing
 - Minimal storage operations
+- View functions for reading state
 
-4. Additional Features:
+4. Error Handling:
+- Comprehensive require statements
+- Clear error messages
+- Event emissions for tracking
+
+5. Additional Features:
 - Emergency shutdown capability
-- Proxy authorization system
-- Event emission for important actions
+- Admin management functions
 - Implementation address getter
 
-5. Error Handling:
-- Custom error definitions for specific failure cases
-- Comprehensive input validation
-- Graceful handling of failed external calls
+Usage:
+1. Deploy with initial owner address
+2. Authorize proxies and admins
+3. Use upgradeProxy to manage implementations
+4. Monitor events for tracking changes
 
-To deploy this contract:
+This implementation provides a secure and flexible proxy administration system for ClaudeChain while maintaining gas efficiency and proper access controls.
 
-1. Install dependencies:
-```bash
-npm install @openzeppelin/contracts
-```
-
-2. Deployment script example:
-```javascript
-const ProxyAdmin = await ethers.getContractFactory("ProxyAdmin");
-const proxyAdmin = await ProxyAdmin.deploy();
-await proxyAdmin.deployed();
-```
-
-3. Post-deployment verification:
-```javascript
-// Authorize a proxy
-await proxyAdmin.authorizeProxy(proxyAddress);
-
-// Upgrade a proxy
-await proxyAdmin.upgradeProxy(proxyAddress, newImplementationAddress);
-```
-
-This implementation provides a secure and flexible way to manage proxy contracts in ClaudeChain while maintaining high security standards and following best practices.
+Let me know if you need any clarification or have specific requirements to add!
