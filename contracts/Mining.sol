@@ -1,203 +1,207 @@
-I'll help develop the Mining.sol contract for ClaudeChain. Let's break this down into steps and create a secure, gas-optimized mining contract.
-
-Key considerations:
-1. Secure reward distribution mechanism
-2. Anti-manipulation safeguards
-3. Gas-efficient operations
-4. Flexible mining parameters
-5. Access control
-
-Here's the production-ready code with detailed explanations:
+I'll help create the Mining.sol smart contract for ClaudeChain. Let's break this down into steps and create a secure, gas-optimized mining contract.
 
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 
 /**
  * @title ClaudeChain Mining Contract
  * @dev Manages mining rewards and distribution for ClaudeChain
- * @notice This contract handles the mining mechanics and reward distribution
+ * @notice This contract handles the mining mechanism and reward distribution
  */
-contract Mining is ReentrancyGuard, Ownable, Pausable {
+contract Mining is Ownable, ReentrancyGuard, Pausable {
     // State variables
-    IERC20 public immutable rewardToken;
-    
-    uint256 public constant MINIMUM_MINING_PERIOD = 1 hours;
-    uint256 public constant MAXIMUM_MINING_PERIOD = 30 days;
-    
-    uint256 public miningPeriod = 24 hours;
-    uint256 public rewardPerPeriod = 1000 * 10**18; // 1000 tokens per period
-    uint256 public lastUpdateTime;
+    IERC20 public immutable rewardToken; // The token used for rewards
+    uint256 public constant BLOCKS_PER_EPOCH = 50400; // ~7 days at 12 sec per block
+    uint256 public baseRewardPerEpoch; // Base reward amount per epoch
+    uint256 public lastEpochUpdate; // Timestamp of last epoch update
+    uint256 public currentEpoch; // Current epoch number
     
     // Miner data structure
     struct Miner {
-        uint256 lastMiningTime;
-        uint256 powerLevel;
-        bool isActive;
+        uint256 power; // Mining power
+        uint256 lastClaimEpoch; // Last epoch when rewards were claimed
+        bool isActive; // Whether the miner is currently active
     }
     
-    // Mapping to store miner data
+    // Mapping of miner addresses to their data
     mapping(address => Miner) public miners;
+    uint256 public totalMiningPower; // Total mining power across all miners
     
     // Events
-    event MinerRegistered(address indexed miner, uint256 powerLevel);
+    event MinerRegistered(address indexed miner, uint256 power);
     event RewardsClaimed(address indexed miner, uint256 amount);
-    event MiningPeriodUpdated(uint256 newPeriod);
-    event RewardRateUpdated(uint256 newRate);
-
+    event MiningPowerUpdated(address indexed miner, uint256 newPower);
+    event EpochUpdated(uint256 indexed epochNumber);
+    
+    // Custom errors
+    error InvalidMiningPower();
+    error NoRewardsAvailable();
+    error EpochNotEnded();
+    error MinerNotActive();
+    
     /**
-     * @dev Contract constructor
-     * @param _rewardToken Address of the ERC20 token used for rewards
+     * @dev Constructor to initialize the mining contract
+     * @param _rewardToken Address of the reward token
+     * @param _baseRewardPerEpoch Initial base reward per epoch
      */
-    constructor(address _rewardToken) {
+    constructor(
+        address _rewardToken,
+        uint256 _baseRewardPerEpoch
+    ) {
         require(_rewardToken != address(0), "Invalid token address");
+        require(_baseRewardPerEpoch > 0, "Invalid reward amount");
+        
         rewardToken = IERC20(_rewardToken);
-        lastUpdateTime = block.timestamp;
+        baseRewardPerEpoch = _baseRewardPerEpoch;
+        lastEpochUpdate = block.timestamp;
+        currentEpoch = 1;
     }
-
+    
     /**
-     * @dev Registers a new miner
-     * @param _powerLevel Initial mining power level
+     * @dev Register a new miner or update existing miner's power
+     * @param _miningPower Mining power to be assigned
      */
-    function registerMiner(uint256 _powerLevel) external whenNotPaused {
-        require(!miners[msg.sender].isActive, "Miner already registered");
-        require(_powerLevel > 0, "Power level must be positive");
+    function registerMiner(uint256 _miningPower) external whenNotPaused {
+        if (_miningPower == 0) revert InvalidMiningPower();
         
-        miners[msg.sender] = Miner({
-            lastMiningTime: block.timestamp,
-            powerLevel: _powerLevel,
-            isActive: true
-        });
+        Miner storage miner = miners[msg.sender];
         
-        emit MinerRegistered(msg.sender, _powerLevel);
+        // Update total mining power
+        if (miner.isActive) {
+            totalMiningPower = totalMiningPower - miner.power + _miningPower;
+        } else {
+            totalMiningPower += _miningPower;
+            miner.isActive = true;
+            miner.lastClaimEpoch = currentEpoch;
+        }
+        
+        miner.power = _miningPower;
+        
+        emit MinerRegistered(msg.sender, _miningPower);
     }
-
+    
     /**
-     * @dev Calculates pending rewards for a miner
-     * @param _miner Address of the miner
-     * @return Pending reward amount
-     */
-    function calculatePendingRewards(address _miner) public view returns (uint256) {
-        Miner memory miner = miners[_miner];
-        if (!miner.isActive) return 0;
-        
-        uint256 timeElapsed = block.timestamp - miner.lastMiningTime;
-        uint256 periods = timeElapsed / miningPeriod;
-        
-        return (periods * rewardPerPeriod * miner.powerLevel) / 100;
-    }
-
-    /**
-     * @dev Claims mining rewards
+     * @dev Calculate and claim rewards for a miner
      */
     function claimRewards() external nonReentrant whenNotPaused {
-        require(miners[msg.sender].isActive, "Not an active miner");
+        Miner storage miner = miners[msg.sender];
+        if (!miner.isActive) revert MinerNotActive();
         
-        uint256 rewards = calculatePendingRewards(msg.sender);
-        require(rewards > 0, "No rewards to claim");
+        updateEpoch();
         
-        miners[msg.sender].lastMiningTime = block.timestamp;
+        uint256 rewards = calculateRewards(msg.sender);
+        if (rewards == 0) revert NoRewardsAvailable();
         
-        require(rewardToken.transfer(msg.sender, rewards), "Reward transfer failed");
+        miner.lastClaimEpoch = currentEpoch;
+        
+        require(rewardToken.transfer(msg.sender, rewards), "Transfer failed");
+        
         emit RewardsClaimed(msg.sender, rewards);
     }
-
+    
     /**
-     * @dev Updates mining period (admin only)
-     * @param _newPeriod New mining period in seconds
+     * @dev Calculate rewards for a specific miner
+     * @param _miner Address of the miner
+     * @return Total rewards available
      */
-    function updateMiningPeriod(uint256 _newPeriod) external onlyOwner {
-        require(_newPeriod >= MINIMUM_MINING_PERIOD, "Period too short");
-        require(_newPeriod <= MAXIMUM_MINING_PERIOD, "Period too long");
+    function calculateRewards(address _miner) public view returns (uint256) {
+        Miner storage miner = miners[_miner];
+        if (!miner.isActive) return 0;
         
-        miningPeriod = _newPeriod;
-        emit MiningPeriodUpdated(_newPeriod);
+        uint256 epochsDiff = currentEpoch - miner.lastClaimEpoch;
+        if (epochsDiff == 0) return 0;
+        
+        uint256 minerShare = (miner.power * 1e18) / totalMiningPower;
+        return (baseRewardPerEpoch * epochsDiff * minerShare) / 1e18;
     }
-
+    
     /**
-     * @dev Updates reward rate (admin only)
-     * @param _newRate New reward rate per period
+     * @dev Update the current epoch if necessary
      */
-    function updateRewardRate(uint256 _newRate) external onlyOwner {
-        require(_newRate > 0, "Invalid reward rate");
-        rewardPerPeriod = _newRate;
-        emit RewardRateUpdated(_newRate);
+    function updateEpoch() public {
+        uint256 blocksSinceLastUpdate = block.number - lastEpochUpdate;
+        uint256 newEpochs = blocksSinceLastUpdate / BLOCKS_PER_EPOCH;
+        
+        if (newEpochs > 0) {
+            currentEpoch += newEpochs;
+            lastEpochUpdate = block.timestamp;
+            emit EpochUpdated(currentEpoch);
+        }
     }
-
+    
+    /**
+     * @dev Update base reward per epoch (owner only)
+     * @param _newReward New reward amount per epoch
+     */
+    function updateBaseReward(uint256 _newReward) external onlyOwner {
+        require(_newReward > 0, "Invalid reward amount");
+        baseRewardPerEpoch = _newReward;
+    }
+    
     /**
      * @dev Emergency pause mining operations
      */
     function pause() external onlyOwner {
         _pause();
     }
-
+    
     /**
      * @dev Resume mining operations
      */
     function unpause() external onlyOwner {
         _unpause();
     }
-
-    /**
-     * @dev Withdraw stuck tokens (admin only)
-     * @param _token Address of the token to withdraw
-     */
-    function withdrawStuckTokens(address _token) external onlyOwner {
-        require(_token != address(rewardToken), "Cannot withdraw reward token");
-        uint256 balance = IERC20(_token).balanceOf(address(this));
-        require(IERC20(_token).transfer(owner(), balance), "Transfer failed");
-    }
 }
 ```
 
-Key design decisions and security considerations:
+Key Design Decisions and Features:
 
-1. **Security Features**:
-- ReentrancyGuard for claim function
-- Pausable functionality for emergency situations
-- Access control using Ownable
-- Input validation for all parameters
-- Safe math operations (Solidity 0.8.x)
+1. Security:
+- Used OpenZeppelin's battle-tested contracts (Ownable, ReentrancyGuard, Pausable)
+- Implemented reentrancy protection for reward claims
+- Added emergency pause functionality
+- Used custom errors for gas efficiency and better error handling
+- Immutable variables where possible
 
-2. **Gas Optimization**:
-- Efficient storage layout
-- Minimal state changes
-- Use of immutable variables where possible
-- Batch calculations for rewards
+2. Gas Optimization:
+- Used custom errors instead of require statements
+- Optimized storage usage with structured data
+- Implemented efficient reward calculation mechanism
+- Used immutable variables for constant values
 
-3. **Error Handling**:
-- Comprehensive require statements
-- Clear error messages
-- Validation of all inputs
-- Safe token transfer checks
+3. Mining Mechanism:
+- Epoch-based mining system (approximately 7 days per epoch)
+- Proportional reward distribution based on mining power
+- Flexible reward adjustment capability
+- Dynamic epoch updates
 
-4. **Flexibility**:
-- Configurable mining periods
-- Adjustable reward rates
-- Power level system for different mining capabilities
+4. Features:
+- Miner registration and power updates
+- Reward calculation and distribution
+- Epoch management
+- Emergency controls
+- Full event logging
 
-5. **Additional Features**:
-- Stuck token recovery
-- View function for pending rewards
-- Detailed event logging
-- Mining power level system
+5. Error Handling:
+- Comprehensive input validation
+- Custom errors for specific failure cases
+- Safe math operations (using Solidity 0.8.x)
 
-To deploy this contract:
-1. Deploy the reward token contract first
-2. Deploy Mining.sol with the reward token address
-3. Transfer reward tokens to the mining contract
-4. Register miners and begin operations
+To deploy this contract, you'll need to:
+1. Deploy the reward token first
+2. Deploy this contract with the token address and initial base reward
+3. Ensure the contract has sufficient reward tokens
 
-Testing recommendations:
-1. Test all administrative functions
-2. Verify reward calculations
-3. Test pause/unpause functionality
-4. Verify token transfer mechanics
-5. Test edge cases for mining periods
+The contract can be extended with additional features in future phases, such as:
+- Staking mechanisms
+- Dynamic reward adjustment based on network parameters
+- More sophisticated mining power calculation
+- Integration with AI components
 
-Let me know if you need any clarification or have questions about specific components!
+Let me know if you need any clarification or have questions about specific parts of the implementation!
