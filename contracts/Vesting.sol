@@ -1,13 +1,13 @@
 I'll help create a secure and gas-optimized token vesting contract for ClaudeChain. Let's break down the development process:
 
-1. First, let's outline the key requirements:
-- Support different vesting schedules for various stakeholders
-- Secure release mechanism
-- Cliff and linear vesting periods
+1. First, let's identify the key requirements:
+- Support for different vesting schedules
+- Secure fund locking and release mechanisms
+- Cliff periods functionality
 - Emergency controls for admin
-- Gas-efficient implementation
+- Gas-efficient withdrawal system
 
-Here's the production-ready code with detailed comments:
+2. Here's the implementation with detailed comments:
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -19,21 +19,20 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 
 /**
- * @title ClaudeChain Token Vesting
+ * @title ClaudeChain Token Vesting Contract
  * @dev Manages token vesting schedules for team members and investors
- * @notice Implements cliff and linear vesting with emergency controls
  */
 contract TokenVesting is Ownable, ReentrancyGuard {
     using SafeMath for uint256;
 
     struct VestingSchedule {
-        uint256 totalAmount;      // Total amount of tokens to be vested
-        uint256 startTime;        // Start time of the vesting period
-        uint256 cliffDuration;    // Cliff period in seconds
-        uint256 duration;         // Total vesting duration in seconds
-        uint256 releasedAmount;   // Amount of tokens already released
-        bool isRevocable;         // Whether the vesting can be revoked
-        bool revoked;             // Whether the vesting has been revoked
+        uint256 totalAmount;        // Total amount of tokens to be vested
+        uint256 startTime;          // Start time of the vesting period
+        uint256 cliffDuration;      // Duration of cliff in seconds
+        uint256 duration;           // Duration of vesting in seconds
+        uint256 releasedAmount;     // Amount of tokens already released
+        bool revocable;             // Whether the vesting is revocable
+        bool revoked;               // Whether the vesting has been revoked
     }
 
     // Token being vested
@@ -48,12 +47,12 @@ contract TokenVesting is Ownable, ReentrancyGuard {
     event VestingRevoked(address indexed beneficiary);
 
     // Custom errors
-    error InvalidBeneficiary();
     error InvalidVestingParameters();
     error NoVestingScheduleFound();
-    error VestingAlreadyRevoked();
+    error CliffPeriodNotEnded();
+    error NoTokensAvailable();
     error NotRevocable();
-    error NothingToRelease();
+    error AlreadyRevoked();
 
     /**
      * @dev Constructor
@@ -65,13 +64,13 @@ contract TokenVesting is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Creates a new vesting schedule for a beneficiary
+     * @dev Creates a new vesting schedule
      * @param _beneficiary Address of the beneficiary
      * @param _totalAmount Total amount of tokens to be vested
      * @param _startTime Start time of the vesting
      * @param _cliffDuration Duration of the cliff period
      * @param _duration Total duration of the vesting
-     * @param _isRevocable Whether the vesting can be revoked
+     * @param _revocable Whether the vesting is revocable
      */
     function createVestingSchedule(
         address _beneficiary,
@@ -79,25 +78,31 @@ contract TokenVesting is Ownable, ReentrancyGuard {
         uint256 _startTime,
         uint256 _cliffDuration,
         uint256 _duration,
-        bool _isRevocable
+        bool _revocable
     ) external onlyOwner {
-        if (_beneficiary == address(0)) revert InvalidBeneficiary();
-        if (_duration == 0 || _duration < _cliffDuration) revert InvalidVestingParameters();
-        if (vestingSchedules[_beneficiary].totalAmount != 0) revert InvalidVestingParameters();
-
-        uint256 currentTime = block.timestamp;
-        require(_startTime >= currentTime, "Start time must be in the future");
+        // Validation
+        if (_beneficiary == address(0) ||
+            _totalAmount == 0 ||
+            _duration == 0 ||
+            _duration < _cliffDuration ||
+            vestingSchedules[_beneficiary].totalAmount != 0) {
+            revert InvalidVestingParameters();
+        }
 
         // Transfer tokens to this contract
-        require(token.transferFrom(msg.sender, address(this), _totalAmount), "Token transfer failed");
+        require(
+            token.transferFrom(msg.sender, address(this), _totalAmount),
+            "Token transfer failed"
+        );
 
+        // Create new vesting schedule
         vestingSchedules[_beneficiary] = VestingSchedule({
             totalAmount: _totalAmount,
             startTime: _startTime,
             cliffDuration: _cliffDuration,
             duration: _duration,
             releasedAmount: 0,
-            isRevocable: _isRevocable,
+            revocable: _revocable,
             revoked: false
         });
 
@@ -105,62 +110,87 @@ contract TokenVesting is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @dev Releases vested tokens for the caller
-     */
-    function release() external nonReentrant {
-        uint256 releasableAmount = calculateReleasableAmount(msg.sender);
-        if (releasableAmount == 0) revert NothingToRelease();
-
-        VestingSchedule storage schedule = vestingSchedules[msg.sender];
-        schedule.releasedAmount = schedule.releasedAmount.add(releasableAmount);
-
-        require(token.transfer(msg.sender, releasableAmount), "Token transfer failed");
-        emit TokensVested(msg.sender, releasableAmount);
-    }
-
-    /**
-     * @dev Calculates the amount of tokens that can be released
+     * @dev Calculates the releasable amount of tokens
      * @param _beneficiary Address of the beneficiary
      * @return Amount of releasable tokens
      */
-    function calculateReleasableAmount(address _beneficiary) public view returns (uint256) {
-        VestingSchedule memory schedule = vestingSchedules[_beneficiary];
-        if (schedule.totalAmount == 0) revert NoVestingScheduleFound();
-        if (schedule.revoked) return 0;
-
-        uint256 currentTime = block.timestamp;
-        if (currentTime < schedule.startTime.add(schedule.cliffDuration)) {
+    function computeReleasableAmount(address _beneficiary) 
+        public 
+        view 
+        returns (uint256) 
+    {
+        VestingSchedule storage schedule = vestingSchedules[_beneficiary];
+        
+        if (schedule.totalAmount == 0) {
+            revert NoVestingScheduleFound();
+        }
+        
+        if (schedule.revoked) {
             return 0;
         }
 
-        uint256 timeFromStart = currentTime.sub(schedule.startTime);
-        uint256 vestedAmount;
-        
-        if (timeFromStart >= schedule.duration) {
-            vestedAmount = schedule.totalAmount;
-        } else {
-            vestedAmount = schedule.totalAmount.mul(timeFromStart).div(schedule.duration);
+        // Check if cliff period has ended
+        if (block.timestamp < schedule.startTime.add(schedule.cliffDuration)) {
+            return 0;
         }
 
+        // If vesting has ended, return all remaining tokens
+        if (block.timestamp >= schedule.startTime.add(schedule.duration)) {
+            return schedule.totalAmount.sub(schedule.releasedAmount);
+        }
+
+        // Calculate vested tokens based on time
+        uint256 timeFromStart = block.timestamp.sub(schedule.startTime);
+        uint256 vestedAmount = schedule.totalAmount.mul(timeFromStart).div(schedule.duration);
         return vestedAmount.sub(schedule.releasedAmount);
     }
 
     /**
-     * @dev Revokes the vesting schedule for a beneficiary
+     * @dev Release vested tokens to beneficiary
+     */
+    function release() external nonReentrant {
+        uint256 releasable = computeReleasableAmount(msg.sender);
+        
+        if (releasable == 0) {
+            revert NoTokensAvailable();
+        }
+
+        VestingSchedule storage schedule = vestingSchedules[msg.sender];
+        schedule.releasedAmount = schedule.releasedAmount.add(releasable);
+
+        require(
+            token.transfer(msg.sender, releasable),
+            "Token transfer failed"
+        );
+
+        emit TokensVested(msg.sender, releasable);
+    }
+
+    /**
+     * @dev Revoke vesting schedule
      * @param _beneficiary Address of the beneficiary
      */
     function revoke(address _beneficiary) external onlyOwner {
         VestingSchedule storage schedule = vestingSchedules[_beneficiary];
-        if (!schedule.isRevocable) revert NotRevocable();
-        if (schedule.revoked) revert VestingAlreadyRevoked();
 
-        uint256 vestedAmount = calculateReleasableAmount(_beneficiary);
+        if (!schedule.revocable) {
+            revert NotRevocable();
+        }
+        
+        if (schedule.revoked) {
+            revert AlreadyRevoked();
+        }
+
+        uint256 vestedAmount = computeReleasableAmount(_beneficiary);
         uint256 refundAmount = schedule.totalAmount.sub(schedule.releasedAmount).sub(vestedAmount);
 
         schedule.revoked = true;
 
         if (refundAmount > 0) {
-            require(token.transfer(owner(), refundAmount), "Token transfer failed");
+            require(
+                token.transfer(owner(), refundAmount),
+                "Token transfer failed"
+            );
         }
 
         emit VestingRevoked(_beneficiary);
@@ -170,33 +200,35 @@ contract TokenVesting is Ownable, ReentrancyGuard {
 
 Key design decisions and security considerations:
 
-1. **Security Features**:
-- Using OpenZeppelin's battle-tested contracts
-- ReentrancyGuard for external calls
-- Comprehensive access controls
-- SafeMath for arithmetic operations
-- Custom errors for gas optimization
+1. Security:
+- Used OpenZeppelin's battle-tested contracts for core functionality
+- Implemented ReentrancyGuard for external calls
+- Added comprehensive input validation
+- Used SafeMath for arithmetic operations
+- Implemented proper access control
 
-2. **Gas Optimization**:
-- Used custom errors instead of strings
-- Optimized storage layout
-- Minimal state changes
-- Efficient calculations
+2. Gas Optimization:
+- Used custom errors instead of require statements
+- Minimized storage operations
+- Efficient computation of vested amounts
+- Strategic use of immutable variables
 
-3. **Flexibility**:
-- Supports both cliff and linear vesting
-- Configurable parameters for different stakeholder groups
-- Revocable/non-revocable schedules
+3. Features:
+- Flexible vesting schedules with cliff periods
+- Revocable and non-revocable vesting options
+- Precise time-based vesting calculations
+- Emergency revocation mechanism
 
-4. **Error Handling**:
+4. Error Handling:
+- Custom errors for better gas efficiency and clarity
 - Comprehensive input validation
-- Clear error messages
-- Fail-safe mechanisms
+- Clear error messages for different scenarios
 
-5. **Additional Features**:
-- Emergency revocation capability
-- Detailed event logging
-- View functions for vesting status
+5. Best Practices:
+- Comprehensive event emissions
+- Clear function documentation
+- Gas-efficient storage patterns
+- Professional code structure
 
 To deploy this contract:
 1. Deploy the ERC20 token contract first
@@ -204,4 +236,4 @@ To deploy this contract:
 3. Approve the vesting contract to spend tokens
 4. Create vesting schedules for beneficiaries
 
-This implementation provides a secure and gas-efficient way to manage token vesting for ClaudeChain's team and investors. Let me know if you need any clarification or have specific requirements to add!
+Would you like me to explain any particular aspect in more detail?
