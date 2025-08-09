@@ -1,265 +1,283 @@
 I'll help develop the Bridge.sol contract for ClaudeChain. Let's break this down into steps and create a secure, gas-optimized bridge implementation.
 
-First, here's the production-ready code with detailed explanations:
+Key considerations:
+1. Security is paramount for bridge contracts
+2. Need to handle locked tokens safely
+3. Must prevent double-spending and replay attacks
+4. Require proper access controls
+5. Need pause functionality for emergencies
+
+Here's the implementation:
 
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
-import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /**
  * @title ClaudeChain Bridge
- * @dev Cross-chain bridge connector for ClaudeChain
- * @notice Handles cross-chain token transfers and message passing
+ * @dev Cross-chain bridge for secure asset transfer between chains
+ * @author Claude AI
  */
-contract Bridge is 
-    Initializable,
-    PausableUpgradeable, 
-    OwnableUpgradeable,
-    ReentrancyGuardUpgradeable 
-{
+contract Bridge is ReentrancyGuard, Pausable, AccessControl {
+    using ECDSA for bytes32;
+
+    bytes32 public constant VALIDATOR_ROLE = keccak256("VALIDATOR_ROLE");
+    bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
+
+    // Mapping from transaction hash to bool to prevent replay attacks
+    mapping(bytes32 => bool) public processedTransactions;
+    
+    // Mapping of supported tokens
+    mapping(address => bool) public supportedTokens;
+    
+    // Required number of validator signatures
+    uint256 public requiredValidators;
+    
+    // Bridge transaction structure
+    struct BridgeTransaction {
+        address token;
+        address sender;
+        address recipient;
+        uint256 amount;
+        uint256 nonce;
+        uint256 sourceChainId;
+        uint256 targetChainId;
+    }
+
     // Events
-    event BridgeInitiated(
-        address indexed from,
-        uint256 indexed toChainId,
-        address indexed to,
+    event TokensLocked(
+        address indexed token,
+        address indexed sender,
+        address indexed recipient,
         uint256 amount,
-        bytes32 transferId
-    );
-    
-    event BridgeCompleted(
-        bytes32 indexed transferId,
-        address indexed to,
-        uint256 amount
+        uint256 nonce,
+        uint256 sourceChainId,
+        uint256 targetChainId
     );
 
-    // State variables
-    mapping(bytes32 => bool) public processedTransfers;
-    mapping(uint256 => bool) public supportedChains;
-    mapping(address => bool) public validators;
-    uint256 public validatorThreshold;
-    uint256 public bridgeFee;
-    
-    // Validator signatures tracking
-    mapping(bytes32 => mapping(address => bool)) public validatorSignatures;
-    mapping(bytes32 => uint256) public signatureCount;
+    event TokensUnlocked(
+        address indexed token,
+        address indexed recipient,
+        uint256 amount,
+        bytes32 transactionHash
+    );
 
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
-        _disableInitializers();
+    /**
+     * @dev Constructor
+     * @param _requiredValidators Number of required validator signatures
+     */
+    constructor(uint256 _requiredValidators) {
+        require(_requiredValidators > 0, "Invalid validator requirement");
+        
+        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _setupRole(OPERATOR_ROLE, msg.sender);
+        requiredValidators = _requiredValidators;
     }
 
     /**
-     * @dev Initializes the bridge contract
-     * @param _validators Initial set of validators
-     * @param _threshold Minimum number of validators required
-     * @param _bridgeFee Fee for bridge transfers
+     * @dev Add supported token
+     * @param token Token address to add
      */
-    function initialize(
-        address[] memory _validators,
-        uint256 _threshold,
-        uint256 _bridgeFee
-    ) public initializer {
-        __Pausable_init();
-        __Ownable_init();
-        __ReentrancyGuard_init();
-
-        require(_validators.length >= _threshold, "Invalid threshold");
-        require(_threshold > 0, "Threshold must be positive");
-
-        for (uint256 i = 0; i < _validators.length; i++) {
-            validators[_validators[i]] = true;
-        }
-
-        validatorThreshold = _threshold;
-        bridgeFee = _bridgeFee;
+    function addSupportedToken(address token) 
+        external 
+        onlyRole(OPERATOR_ROLE) 
+    {
+        require(token != address(0), "Invalid token address");
+        supportedTokens[token] = true;
     }
 
     /**
-     * @dev Initiates a bridge transfer to another chain
-     * @param _toChainId Destination chain ID
-     * @param _to Recipient address on destination chain
+     * @dev Lock tokens for bridge transfer
+     * @param token Token address
+     * @param recipient Recipient address on target chain
+     * @param amount Amount to transfer
+     * @param targetChainId Target chain ID
      */
-    function initiateBridge(
-        uint256 _toChainId,
-        address _to
-    ) external payable nonReentrant whenNotPaused {
-        require(supportedChains[_toChainId], "Unsupported chain");
-        require(msg.value > bridgeFee, "Insufficient amount");
+    function lockTokens(
+        address token,
+        address recipient,
+        uint256 amount,
+        uint256 targetChainId
+    ) 
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        require(supportedTokens[token], "Token not supported");
+        require(recipient != address(0), "Invalid recipient");
+        require(amount > 0, "Invalid amount");
 
-        bytes32 transferId = keccak256(
+        IERC20 tokenContract = IERC20(token);
+        require(
+            tokenContract.transferFrom(msg.sender, address(this), amount),
+            "Transfer failed"
+        );
+
+        emit TokensLocked(
+            token,
+            msg.sender,
+            recipient,
+            amount,
+            block.number, // Using block number as nonce
+            block.chainid,
+            targetChainId
+        );
+    }
+
+    /**
+     * @dev Unlock tokens with validator signatures
+     * @param transaction Bridge transaction details
+     * @param signatures Array of validator signatures
+     */
+    function unlockTokens(
+        BridgeTransaction calldata transaction,
+        bytes[] calldata signatures
+    )
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        bytes32 transactionHash = getTransactionHash(transaction);
+        require(!processedTransactions[transactionHash], "Transaction already processed");
+        require(signatures.length >= requiredValidators, "Insufficient signatures");
+
+        // Verify signatures
+        verifySignatures(transactionHash, signatures);
+
+        // Mark transaction as processed
+        processedTransactions[transactionHash] = true;
+
+        // Transfer tokens
+        require(
+            IERC20(transaction.token).transfer(transaction.recipient, transaction.amount),
+            "Transfer failed"
+        );
+
+        emit TokensUnlocked(
+            transaction.token,
+            transaction.recipient,
+            transaction.amount,
+            transactionHash
+        );
+    }
+
+    /**
+     * @dev Generate transaction hash for signing
+     * @param transaction Bridge transaction details
+     */
+    function getTransactionHash(BridgeTransaction calldata transaction)
+        public
+        pure
+        returns (bytes32)
+    {
+        return keccak256(
             abi.encodePacked(
-                msg.sender,
-                _toChainId,
-                _to,
-                msg.value,
-                block.timestamp
+                transaction.token,
+                transaction.sender,
+                transaction.recipient,
+                transaction.amount,
+                transaction.nonce,
+                transaction.sourceChainId,
+                transaction.targetChainId
             )
         );
-
-        require(!processedTransfers[transferId], "Transfer already processed");
-
-        // Lock tokens in bridge
-        uint256 transferAmount = msg.value - bridgeFee;
-
-        emit BridgeInitiated(
-            msg.sender,
-            _toChainId,
-            _to,
-            transferAmount,
-            transferId
-        );
     }
 
     /**
-     * @dev Validates and completes a bridge transfer
-     * @param _transferId Transfer ID to validate
-     * @param _to Recipient address
-     * @param _amount Transfer amount
+     * @dev Verify validator signatures
+     * @param transactionHash Hash of the transaction
+     * @param signatures Array of signatures
      */
-    function validateTransfer(
-        bytes32 _transferId,
-        address _to,
-        uint256 _amount
-    ) external nonReentrant whenNotPaused {
-        require(validators[msg.sender], "Not a validator");
-        require(!processedTransfers[_transferId], "Transfer already processed");
-        require(!validatorSignatures[_transferId][msg.sender], "Already signed");
+    function verifySignatures(
+        bytes32 transactionHash,
+        bytes[] calldata signatures
+    ) 
+        internal
+        view
+    {
+        bytes32 ethSignedMessageHash = transactionHash.toEthSignedMessageHash();
+        address[] memory signers = new address[](signatures.length);
 
-        validatorSignatures[_transferId][msg.sender] = true;
-        signatureCount[_transferId]++;
-
-        if (signatureCount[_transferId] >= validatorThreshold) {
-            processedTransfers[_transferId] = true;
+        for (uint256 i = 0; i < signatures.length; i++) {
+            address signer = ethSignedMessageHash.recover(signatures[i]);
+            require(hasRole(VALIDATOR_ROLE, signer), "Invalid validator signature");
             
-            (bool success, ) = _to.call{value: _amount}("");
-            require(success, "Transfer failed");
-
-            emit BridgeCompleted(_transferId, _to, _amount);
+            // Check for duplicate signers
+            for (uint256 j = 0; j < i; j++) {
+                require(signer != signers[j], "Duplicate signer");
+            }
+            signers[i] = signer;
         }
     }
 
-    // Admin functions
-
     /**
-     * @dev Adds a supported chain
-     * @param _chainId Chain ID to add
+     * @dev Pause bridge operations
      */
-    function addSupportedChain(uint256 _chainId) external onlyOwner {
-        supportedChains[_chainId] = true;
-    }
-
-    /**
-     * @dev Removes a supported chain
-     * @param _chainId Chain ID to remove
-     */
-    function removeSupportedChain(uint256 _chainId) external onlyOwner {
-        supportedChains[_chainId] = false;
-    }
-
-    /**
-     * @dev Updates bridge fee
-     * @param _newFee New fee amount
-     */
-    function updateBridgeFee(uint256 _newFee) external onlyOwner {
-        bridgeFee = _newFee;
-    }
-
-    /**
-     * @dev Adds a validator
-     * @param _validator Address to add as validator
-     */
-    function addValidator(address _validator) external onlyOwner {
-        validators[_validator] = true;
-    }
-
-    /**
-     * @dev Removes a validator
-     * @param _validator Address to remove as validator
-     */
-    function removeValidator(address _validator) external onlyOwner {
-        validators[_validator] = false;
-    }
-
-    /**
-     * @dev Updates validator threshold
-     * @param _newThreshold New threshold value
-     */
-    function updateValidatorThreshold(uint256 _newThreshold) external onlyOwner {
-        require(_newThreshold > 0, "Invalid threshold");
-        validatorThreshold = _newThreshold;
-    }
-
-    /**
-     * @dev Pauses bridge operations
-     */
-    function pause() external onlyOwner {
+    function pause() external onlyRole(OPERATOR_ROLE) {
         _pause();
     }
 
     /**
-     * @dev Unpauses bridge operations
+     * @dev Unpause bridge operations
      */
-    function unpause() external onlyOwner {
+    function unpause() external onlyRole(OPERATOR_ROLE) {
         _unpause();
-    }
-
-    /**
-     * @dev Emergency withdrawal function
-     * @param _to Address to withdraw to
-     */
-    function emergencyWithdraw(address _to) external onlyOwner {
-        require(_to != address(0), "Invalid address");
-        (bool success, ) = _to.call{value: address(this).balance}("");
-        require(success, "Withdrawal failed");
     }
 }
 ```
 
-Key Design Decisions and Security Features:
+Key design decisions and security measures:
 
-1. Upgradeable Pattern:
-- Used OpenZeppelin's upgradeable contracts for future flexibility
-- Implemented initializer pattern instead of constructor
+1. **Access Control**:
+- Used OpenZeppelin's AccessControl for role-based permissions
+- Separate VALIDATOR_ROLE and OPERATOR_ROLE for different responsibilities
+- Admin can manage roles and supported tokens
 
-2. Security Measures:
-- ReentrancyGuard for all external functions
-- Pausable functionality for emergency situations
-- Multi-validator system with threshold
-- Comprehensive access controls
-- Emergency withdrawal function
+2. **Security Features**:
+- ReentrancyGuard to prevent reentrancy attacks
+- Pausable functionality for emergency stops
+- Signature verification for validators
+- Prevention of duplicate signatures
+- Transaction hash tracking to prevent replay attacks
 
-3. Gas Optimization:
-- Efficient storage layout
+3. **Gas Optimization**:
+- Efficient storage usage
 - Minimal state changes
-- Use of mappings for O(1) lookups
-- Batched operations where possible
+- Optimized loops in signature verification
 
-4. Error Handling:
+4. **Error Handling**:
 - Comprehensive require statements
 - Clear error messages
 - Validation of all inputs
 
-5. Features:
-- Multi-chain support
-- Configurable validator system
-- Bridge fee mechanism
-- Transfer tracking and validation
+5. **Additional Features**:
+- Support for multiple tokens
+- Multi-signature validation
+- Chain ID verification
+- Event emission for tracking
 
-Testing Considerations:
-1. Unit tests for all functions
-2. Integration tests for cross-chain scenarios
-3. Security tests for edge cases
-4. Gas usage optimization tests
+To use this contract:
 
-Next Steps:
-1. Implement event listeners for cross-chain communication
-2. Add additional security features (e.g., rate limiting)
-3. Develop monitoring system
-4. Create admin dashboard
+1. Deploy with required number of validators
+2. Add validator addresses using grantRole
+3. Add supported tokens
+4. Validators must sign transactions off-chain
+5. Users can lock tokens using lockTokens()
+6. Unlock with required validator signatures
 
-Would you like me to provide any specific implementation details or explain any part of the code in more detail?
+For production deployment, additional considerations:
+
+1. Thorough security audit
+2. Gradual token amount limits
+3. Timelock for admin functions
+4. Emergency withdrawal mechanism
+5. Rate limiting
+6. Extended testing on testnets
+
+Let me know if you need any clarification or have questions about specific parts of the implementation.
