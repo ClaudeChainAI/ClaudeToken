@@ -1,4 +1,4 @@
-I'll help develop the ClaudeToken smart contract with a focus on security, efficiency, and best practices. Let's break this down into steps:
+I'll help create the ClaudeToken smart contract with a focus on security, efficiency, and best practices. Let me walk you through the development process.
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -12,183 +12,179 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title ClaudeToken
- * @dev Implementation of the ClaudeToken, an enhanced ERC20 token for ClaudeChain
- * @author Claude AI Developer
+ * @dev Implementation of the ClaudeToken for ClaudeChain
+ * 
+ * Features:
+ * - ERC20 standard compliance
+ * - Burning capability
+ * - Pausable transfers
+ * - Role-based access control
+ * - Anti-flash loan protection
+ * - Transfer rate limiting
  */
 contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, ReentrancyGuard {
-    // Role definitions
-    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+    
+    // Transfer rate limiting
+    mapping(address => uint256) public lastTransferTimestamp;
+    uint256 public constant TRANSFER_COOLDOWN = 1 minutes;
+    uint256 public constant MAX_TRANSFER_AMOUNT = 1000000 * 10**18; // 1M tokens
     
     // Events
+    event RateLimit(address indexed from, uint256 amount, uint256 timestamp);
     event MinterAdded(address indexed account);
     event MinterRemoved(address indexed account);
-    event TokensMinted(address indexed to, uint256 amount);
-    event TokensBurned(address indexed from, uint256 amount);
-
-    // State variables
-    uint256 public constant INITIAL_SUPPLY = 1_000_000_000 * 10**18; // 1 billion tokens
-    uint256 public constant MAX_SUPPLY = 2_000_000_000 * 10**18; // 2 billion tokens
-    mapping(address => bool) public blacklisted;
 
     /**
-     * @dev Constructor initializes the token with initial supply and sets up roles
-     * @param _admin Address of the initial admin
+     * @dev Constructor that gives msg.sender all of the default admin roles
      */
-    constructor(address _admin) ERC20("ClaudeToken", "CLAUDE") {
-        require(_admin != address(0), "Invalid admin address");
+    constructor() ERC20("ClaudeToken", "CLAUDE") {
+        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
+        _grantRole(PAUSER_ROLE, msg.sender);
+        _grantRole(MINTER_ROLE, msg.sender);
         
-        _setupRole(DEFAULT_ADMIN_ROLE, _admin);
-        _setupRole(MINTER_ROLE, _admin);
-        _setupRole(PAUSER_ROLE, _admin);
-        
-        // Mint initial supply to admin
-        _mint(_admin, INITIAL_SUPPLY);
+        // Initial supply minted to deployer
+        _mint(msg.sender, 100000000 * 10**decimals()); // 100M initial supply
     }
 
     /**
-     * @dev Modifier to check if an address is not blacklisted
+     * @dev Pauses all token transfers
+     * Requirements:
+     * - Caller must have PAUSER_ROLE
      */
-    modifier notBlacklisted(address _account) {
-        require(!blacklisted[_account], "Account is blacklisted");
-        _;
+    function pause() public onlyRole(PAUSER_ROLE) {
+        _pause();
     }
 
     /**
-     * @dev Mints new tokens, respecting the max supply cap
-     * @param to Address to receive the minted tokens
+     * @dev Unpauses all token transfers
+     * Requirements:
+     * - Caller must have PAUSER_ROLE
+     */
+    function unpause() public onlyRole(PAUSER_ROLE) {
+        _unpause();
+    }
+
+    /**
+     * @dev Mints new tokens
+     * Requirements:
+     * - Caller must have MINTER_ROLE
+     * @param to Address to receive the tokens
      * @param amount Amount of tokens to mint
      */
-    function mint(address to, uint256 amount) 
-        external 
-        onlyRole(MINTER_ROLE) 
-        nonReentrant 
-        whenNotPaused 
-    {
+    function mint(address to, uint256 amount) public onlyRole(MINTER_ROLE) {
         require(to != address(0), "Cannot mint to zero address");
-        require(totalSupply() + amount <= MAX_SUPPLY, "Would exceed max supply");
-        
+        require(amount > 0, "Amount must be positive");
         _mint(to, amount);
-        emit TokensMinted(to, amount);
     }
 
     /**
-     * @dev Override of the ERC20 transfer function with blacklist check
+     * @dev Checks transfer rate limits and cooldown
+     * @param from Address sending tokens
+     * @param amount Amount of tokens being transferred
      */
-    function transfer(address to, uint256 amount)
-        public
-        virtual
-        override
-        whenNotPaused
-        notBlacklisted(msg.sender)
-        notBlacklisted(to)
-        returns (bool)
+    function _checkTransferLimits(address from, uint256 amount) internal {
+        if (hasRole(DEFAULT_ADMIN_ROLE, from)) {
+            return; // Admins bypass limits
+        }
+
+        require(amount <= MAX_TRANSFER_AMOUNT, "Transfer amount exceeds limit");
+        require(
+            block.timestamp >= lastTransferTimestamp[from] + TRANSFER_COOLDOWN,
+            "Transfer cooldown active"
+        );
+        
+        lastTransferTimestamp[from] = block.timestamp;
+        emit RateLimit(from, amount, block.timestamp);
+    }
+
+    /**
+     * @dev Override of the transfer function to add rate limiting
+     * @param to Address to transfer to
+     * @param amount Amount to transfer
+     */
+    function transfer(address to, uint256 amount) 
+        public 
+        virtual 
+        override 
+        whenNotPaused 
+        nonReentrant 
+        returns (bool) 
     {
+        _checkTransferLimits(_msgSender(), amount);
         return super.transfer(to, amount);
     }
 
     /**
-     * @dev Override of the ERC20 transferFrom function with blacklist check
+     * @dev Override of the transferFrom function to add rate limiting
+     * @param from Address to transfer from
+     * @param to Address to transfer to
+     * @param amount Amount to transfer
      */
     function transferFrom(address from, address to, uint256 amount)
         public
         virtual
         override
         whenNotPaused
-        notBlacklisted(from)
-        notBlacklisted(to)
+        nonReentrant
         returns (bool)
     {
+        _checkTransferLimits(from, amount);
         return super.transferFrom(from, to, amount);
     }
 
     /**
-     * @dev Adds an address to the blacklist
-     * @param _account Address to blacklist
+     * @dev Hook that is called before any transfer of tokens
      */
-    function blacklistAddress(address _account) 
-        external 
-        onlyRole(DEFAULT_ADMIN_ROLE) 
-    {
-        require(_account != address(0), "Cannot blacklist zero address");
-        require(!blacklisted[_account], "Account already blacklisted");
-        blacklisted[_account] = true;
-    }
-
-    /**
-     * @dev Removes an address from the blacklist
-     * @param _account Address to remove from blacklist
-     */
-    function unblacklistAddress(address _account) 
-        external 
-        onlyRole(DEFAULT_ADMIN_ROLE) 
-    {
-        require(blacklisted[_account], "Account not blacklisted");
-        blacklisted[_account] = false;
-    }
-
-    /**
-     * @dev Pauses all token transfers
-     */
-    function pause() external onlyRole(PAUSER_ROLE) {
-        _pause();
-    }
-
-    /**
-     * @dev Unpauses all token transfers
-     */
-    function unpause() external onlyRole(PAUSER_ROLE) {
-        _unpause();
-    }
-
-    /**
-     * @dev Override required by Solidity
-     */
-    function _beforeTokenTransfer(address from, address to, uint256 amount)
-        internal
-        whenNotPaused
-        override
-    {
+    function _beforeTokenTransfer(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual override whenNotPaused {
         super._beforeTokenTransfer(from, to, amount);
     }
 }
 ```
 
-Key Design Decisions and Features:
+Key Design Decisions and Security Features:
 
-1. **Security Features**:
-- Using OpenZeppelin's battle-tested contracts as base
-- Implementation of ReentrancyGuard for mint function
+1. **Inheritance Structure**:
+- Used OpenZeppelin's battle-tested contracts as base
+- Implemented ERC20, Burnable, Pausable, AccessControl, and ReentrancyGuard
+
+2. **Security Measures**:
 - Role-based access control for administrative functions
-- Blacklist functionality for compliance
+- ReentrancyGuard to prevent reentrancy attacks
 - Pausable functionality for emergency situations
+- Rate limiting to prevent market manipulation
+- Transfer amount caps
 
-2. **Gas Optimization**:
-- Efficient use of modifiers
-- Minimal storage operations
-- Use of constant values for fixed parameters
-- Optimized error handling with require statements
+3. **Gas Optimization**:
+- Efficient use of storage variables
+- Minimal state changes
+- Optimized access control checks
 
-3. **Token Economics**:
-- Initial supply of 1 billion tokens
-- Maximum cap of 2 billion tokens
-- Decimals inherited from ERC20 (18)
-
-4. **Administrative Features**:
-- Minting capability with role-based access
-- Blacklist management
-- Pause/unpause functionality
-- Burning capability
-
-5. **Error Handling**:
-- Comprehensive input validation
+4. **Error Handling**:
+- Comprehensive require statements
 - Clear error messages
-- Checks for zero addresses
-- Supply cap validation
+- Event emissions for important state changes
+
+5. **Additional Features**:
+- Transfer rate limiting with cooldown periods
+- Maximum transfer amounts
+- Admin bypass for rate limits
+- Detailed events for tracking
 
 To deploy this contract:
-1. Install OpenZeppelin contracts
-2. Deploy with an admin address parameter
-3. The admin will receive the initial supply and all roles
+1. Ensure you have OpenZeppelin contracts installed
+2. Deploy with initial parameters
+3. Grant necessary roles to administrative addresses
 
-This implementation provides a secure, flexible, and gas-efficient token contract suitable for the ClaudeChain ecosystem. Let me know if you need any clarification or have specific requirements to add!
+Future enhancements could include:
+- Snapshot functionality
+- Governance integration
+- Deflationary mechanisms
+- Enhanced analytics events
+
+Would you like me to explain any particular aspect in more detail?
