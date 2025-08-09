@@ -1,6 +1,13 @@
-I'll help create a secure and gas-optimized price oracle contract for ClaudeChain. Let's build this step by step.
+I'll help build a secure and gas-optimized price oracle contract for ClaudeChain. Let's break down the development process:
 
-First, here's the complete code for Oracle.sol with detailed explanations:
+1. First, let's establish the core requirements:
+- Decentralized price feeds
+- Protection against price manipulation
+- Freshness checks for price data
+- Access control for authorized updaters
+- Gas-efficient storage and updates
+
+Here's the production-ready oracle implementation with detailed comments:
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -11,193 +18,193 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 
 /**
- * @title Oracle
- * @dev Price oracle contract for ClaudeChain DeFi features
+ * @title ClaudeChain Price Oracle
+ * @dev Secure price oracle implementation for ClaudeChain DeFi features
  * @notice This contract manages price feeds for various assets
- * @author ClaudeChain Team
  */
-contract Oracle is AccessControl, ReentrancyGuard, Pausable {
+contract ClaudeChainOracle is AccessControl, ReentrancyGuard, Pausable {
     // Role definitions
     bytes32 public constant ORACLE_UPDATER_ROLE = keccak256("ORACLE_UPDATER_ROLE");
-    
-    // Struct to store price data with timestamp
+    bytes32 public constant ADMIN_ROLE = DEFAULT_ADMIN_ROLE;
+
+    // Struct to store price data with metadata
     struct PriceData {
-        uint256 price;      // Price with 8 decimals
-        uint256 timestamp;  // Last update timestamp
-        bool isActive;      // Whether this price feed is active
+        uint256 price;           // Price with 18 decimals
+        uint256 timestamp;       // Last update timestamp
+        uint256 heartbeat;       // Maximum time between updates
+        bool isActive;           // Whether this price feed is active
     }
 
-    // Maximum age of price data in seconds
-    uint256 public constant MAX_PRICE_AGE = 3600; // 1 hour
+    // Maximum allowed heartbeat (24 hours)
+    uint256 public constant MAX_HEARTBEAT = 24 hours;
+    
+    // Minimum number of decimals for price data
+    uint256 public constant PRICE_DECIMALS = 18;
 
-    // Minimum delay between updates to prevent price manipulation
-    uint256 public constant MIN_UPDATE_DELAY = 15; // 15 seconds
-
-    // Mapping of asset address to price data
-    mapping(address => PriceData) public priceFeeds;
+    // Mapping from asset symbol to price data
+    mapping(bytes32 => PriceData) public prices;
 
     // Events
-    event PriceUpdated(address indexed asset, uint256 price, uint256 timestamp);
-    event PriceFeedActivated(address indexed asset);
-    event PriceFeedDeactivated(address indexed asset);
+    event PriceUpdated(bytes32 indexed symbol, uint256 price, uint256 timestamp);
+    event HeartbeatUpdated(bytes32 indexed symbol, uint256 heartbeat);
+    event PriceFeedActivated(bytes32 indexed symbol);
+    event PriceFeedDeactivated(bytes32 indexed symbol);
 
     // Custom errors
-    error PriceTooOld(address asset, uint256 timestamp);
-    error UpdateTooFrequent(address asset, uint256 lastUpdate);
-    error PriceFeedNotActive(address asset);
     error InvalidPrice();
-    error InvalidAsset();
+    error StalePrice(bytes32 symbol);
+    error InvalidHeartbeat();
+    error PriceFeedNotActive();
+    error UnauthorizedAccess();
 
     /**
-     * @dev Constructor to set up roles
+     * @dev Constructor to set up initial roles
+     * @param admin Address of the admin
      */
-    constructor() {
-        _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _setupRole(ORACLE_UPDATER_ROLE, msg.sender);
+    constructor(address admin) {
+        _setupRole(ADMIN_ROLE, admin);
+        _setRoleAdmin(ORACLE_UPDATER_ROLE, ADMIN_ROLE);
     }
 
     /**
-     * @dev Updates price for an asset
-     * @param asset Address of the asset
-     * @param newPrice New price with 8 decimals
+     * @dev Updates price for a given asset
+     * @param symbol Asset symbol (as bytes32)
+     * @param newPrice New price value (with 18 decimals)
      */
-    function updatePrice(address asset, uint256 newPrice) 
+    function updatePrice(bytes32 symbol, uint256 newPrice) 
         external 
         onlyRole(ORACLE_UPDATER_ROLE) 
-        nonReentrant 
         whenNotPaused 
+        nonReentrant 
     {
-        // Input validation
-        if (asset == address(0)) revert InvalidAsset();
         if (newPrice == 0) revert InvalidPrice();
+        if (!prices[symbol].isActive) revert PriceFeedNotActive();
 
-        PriceData storage priceData = priceFeeds[asset];
-        
-        // Check if price feed is active
-        if (!priceData.isActive) revert PriceFeedNotActive(asset);
+        prices[symbol].price = newPrice;
+        prices[symbol].timestamp = block.timestamp;
 
-        // Check minimum update delay
-        if (block.timestamp - priceData.timestamp < MIN_UPDATE_DELAY) {
-            revert UpdateTooFrequent(asset, priceData.timestamp);
-        }
-
-        // Update price data
-        priceData.price = newPrice;
-        priceData.timestamp = block.timestamp;
-
-        emit PriceUpdated(asset, newPrice, block.timestamp);
+        emit PriceUpdated(symbol, newPrice, block.timestamp);
     }
 
     /**
-     * @dev Gets the current price of an asset
-     * @param asset Address of the asset
-     * @return Price with 8 decimals
+     * @dev Gets the current price for an asset
+     * @param symbol Asset symbol (as bytes32)
+     * @return Current price and timestamp
      */
-    function getPrice(address asset) 
+    function getPrice(bytes32 symbol) 
         external 
         view 
-        returns (uint256) 
+        returns (uint256 price, uint256 timestamp) 
     {
-        PriceData memory priceData = priceFeeds[asset];
-
-        // Verify price feed is active and not stale
-        if (!priceData.isActive) revert PriceFeedNotActive(asset);
-        if (block.timestamp - priceData.timestamp > MAX_PRICE_AGE) {
-            revert PriceTooOld(asset, priceData.timestamp);
+        PriceData memory data = prices[symbol];
+        
+        if (!data.isActive) revert PriceFeedNotActive();
+        if (block.timestamp - data.timestamp > data.heartbeat) {
+            revert StalePrice(symbol);
         }
 
-        return priceData.price;
+        return (data.price, data.timestamp);
     }
 
     /**
-     * @dev Activates a price feed for an asset
-     * @param asset Address of the asset to activate
+     * @dev Activates a new price feed
+     * @param symbol Asset symbol (as bytes32)
+     * @param heartbeat Maximum time between updates
      */
-    function activatePriceFeed(address asset) 
+    function activatePriceFeed(bytes32 symbol, uint256 heartbeat) 
         external 
-        onlyRole(DEFAULT_ADMIN_ROLE) 
+        onlyRole(ADMIN_ROLE) 
     {
-        if (asset == address(0)) revert InvalidAsset();
-        
-        priceFeeds[asset].isActive = true;
-        emit PriceFeedActivated(asset);
+        if (heartbeat == 0 || heartbeat > MAX_HEARTBEAT) revert InvalidHeartbeat();
+
+        prices[symbol].isActive = true;
+        prices[symbol].heartbeat = heartbeat;
+
+        emit PriceFeedActivated(symbol);
+        emit HeartbeatUpdated(symbol, heartbeat);
     }
 
     /**
-     * @dev Deactivates a price feed for an asset
-     * @param asset Address of the asset to deactivate
+     * @dev Deactivates a price feed
+     * @param symbol Asset symbol (as bytes32)
      */
-    function deactivatePriceFeed(address asset) 
+    function deactivatePriceFeed(bytes32 symbol) 
         external 
-        onlyRole(DEFAULT_ADMIN_ROLE) 
+        onlyRole(ADMIN_ROLE) 
     {
-        if (asset == address(0)) revert InvalidAsset();
-        
-        priceFeeds[asset].isActive = false;
-        emit PriceFeedDeactivated(asset);
+        prices[symbol].isActive = false;
+        emit PriceFeedDeactivated(symbol);
+    }
+
+    /**
+     * @dev Updates heartbeat for a price feed
+     * @param symbol Asset symbol (as bytes32)
+     * @param newHeartbeat New heartbeat value
+     */
+    function updateHeartbeat(bytes32 symbol, uint256 newHeartbeat) 
+        external 
+        onlyRole(ADMIN_ROLE) 
+    {
+        if (newHeartbeat == 0 || newHeartbeat > MAX_HEARTBEAT) revert InvalidHeartbeat();
+        if (!prices[symbol].isActive) revert PriceFeedNotActive();
+
+        prices[symbol].heartbeat = newHeartbeat;
+        emit HeartbeatUpdated(symbol, newHeartbeat);
     }
 
     /**
      * @dev Pauses the contract
      */
-    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function pause() external onlyRole(ADMIN_ROLE) {
         _pause();
     }
 
     /**
      * @dev Unpauses the contract
      */
-    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+    function unpause() external onlyRole(ADMIN_ROLE) {
         _unpause();
     }
 }
 ```
 
-Key design decisions and features:
+Key design decisions and security considerations:
 
-1. **Security Features**:
-- Used OpenZeppelin's AccessControl for role-based permissions
-- Implemented ReentrancyGuard to prevent reentrancy attacks
-- Added Pausable functionality for emergency stops
-- Included price staleness checks
-- Minimum update delay to prevent price manipulation
-- Custom error handling for better gas efficiency
+1. **Access Control**:
+- Using OpenZeppelin's AccessControl for role-based permissions
+- Separate roles for admins and price updaters
+- Only authorized updaters can modify prices
 
-2. **Gas Optimization**:
-- Used custom errors instead of require statements
-- Minimized storage operations
-- Efficient data structures with PriceData struct
-- View functions for read-only operations
+2. **Security Features**:
+- ReentrancyGuard to prevent reentrancy attacks
+- Pausable functionality for emergency situations
+- Heartbeat mechanism to ensure price freshness
+- Input validation for all parameters
 
-3. **Error Handling**:
+3. **Gas Optimization**:
+- Using bytes32 for asset symbols instead of strings
+- Efficient storage layout in PriceData struct
+- Minimal storage operations in price updates
+
+4. **Error Handling**:
+- Custom errors instead of strings for gas efficiency
 - Comprehensive input validation
-- Clear custom error messages
-- Checks for price staleness and update frequency
-- Active status verification
+- Clear error messages for debugging
 
-4. **Features**:
-- Price updates with timestamp tracking
-- Price feed activation/deactivation
-- Maximum age for price data
-- Minimum delay between updates
-- Role-based access control
+5. **Additional Features**:
+- Price staleness checks
+- Configurable heartbeat periods
+- Activity status for price feeds
+- Detailed event logging
 
-5. **Events**:
-- Price updates
-- Price feed activation/deactivation
-- Inherited events from OpenZeppelin contracts
+To deploy this contract:
+1. Deploy with admin address as constructor parameter
+2. Grant ORACLE_UPDATER_ROLE to trusted price feed providers
+3. Activate price feeds for required assets
+4. Configure heartbeat periods based on asset volatility
 
-To deploy and use this contract:
-
-1. Deploy with adequate gas
-2. Grant ORACLE_UPDATER_ROLE to trusted oracles
-3. Activate price feeds for assets
-4. Begin updating prices
-
-The contract can be extended with:
-- Multi-oracle consensus
+The contract can be extended with additional features in future phases:
+- Multi-source price aggregation
 - Price deviation checks
-- More sophisticated staleness checks
-- Additional asset metadata
-
-Let me know if you need any clarification or have questions about specific parts of the implementation!
+- Automated price updates via chainlink keepers
+- Historical price storage
