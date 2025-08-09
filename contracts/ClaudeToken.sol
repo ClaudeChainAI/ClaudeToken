@@ -1,187 +1,193 @@
-I'll help develop the ClaudeToken smart contract with a focus on security, optimization, and best practices. Let's break this down step by step.
+I'll help create the ClaudeToken smart contract with a focus on security, efficiency, and best practices. Let's break down the development process:
 
-First, here's the complete code for ClaudeToken.sol:
+1. First, I'll lay out the key features and considerations:
+- ERC-20 compliance
+- Secure access control
+- Anti-manipulation safeguards
+- Gas optimization
+- Future upgradeability potential
+
+Here's the production-ready code with detailed explanations:
 
 ```solidity
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.17;
+pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title ClaudeToken
- * @dev Implementation of the ClaudeToken, the native token for ClaudeChain
+ * @dev Implementation of the ClaudeChain native token with enhanced security features
  * @custom:security-contact security@claudechain.io
  */
-contract ClaudeToken is ERC20, ERC20Burnable, Pausable, AccessControl, ReentrancyGuard {
+contract ClaudeToken is ERC20, Pausable, AccessControl, ReentrancyGuard {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+    bytes32 public constant BURNER_ROLE = keccak256("BURNER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+
+    // Anti-whale transfer limit (can be adjusted by admin)
+    uint256 public maxTransferAmount;
     
-    uint256 public constant INITIAL_SUPPLY = 1_000_000_000 * 10**18; // 1 billion tokens
-    uint256 public constant MAX_SUPPLY = 2_000_000_000 * 10**18; // 2 billion tokens
-    
-    // Mapping to track locked tokens
-    mapping(address => uint256) private _lockedTokens;
-    mapping(address => uint256) private _lockEndTime;
+    // Mapping for blacklisted addresses
+    mapping(address => bool) public isBlacklisted;
     
     // Events
-    event TokensLocked(address indexed account, uint256 amount, uint256 unlockTime);
-    event TokensUnlocked(address indexed account, uint256 amount);
-    
+    event MaxTransferAmountUpdated(uint256 newAmount);
+    event AddressBlacklisted(address indexed account, bool status);
+    event TokensBurned(address indexed burner, uint256 amount);
+
     /**
-     * @dev Constructor that gives msg.sender all initial tokens and all roles
+     * @dev Constructor initializes the token with initial supply and roles
+     * @param initialSupply The initial token supply to mint
+     * @param adminAddress The address to receive admin role
      */
-    constructor() ERC20("ClaudeToken", "CLAUDE") {
-        _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        _grantRole(MINTER_ROLE, msg.sender);
-        _grantRole(PAUSER_ROLE, msg.sender);
+    constructor(
+        uint256 initialSupply,
+        address adminAddress
+    ) ERC20("ClaudeToken", "CLAUDE") {
+        require(adminAddress != address(0), "Invalid admin address");
         
-        _mint(msg.sender, INITIAL_SUPPLY);
+        _setupRole(DEFAULT_ADMIN_ROLE, adminAddress);
+        _setupRole(MINTER_ROLE, adminAddress);
+        _setupRole(BURNER_ROLE, adminAddress);
+        _setupRole(PAUSER_ROLE, adminAddress);
+        
+        maxTransferAmount = initialSupply / 100; // Set initial max transfer to 1% of supply
+        _mint(adminAddress, initialSupply);
     }
-    
+
     /**
      * @dev Pauses all token transfers
-     * Requirements:
-     * - caller must have PAUSER_ROLE
+     * Requirements: Caller must have PAUSER_ROLE
      */
-    function pause() public onlyRole(PAUSER_ROLE) {
+    function pause() external onlyRole(PAUSER_ROLE) {
         _pause();
     }
-    
+
     /**
      * @dev Unpauses all token transfers
-     * Requirements:
-     * - caller must have PAUSER_ROLE
+     * Requirements: Caller must have PAUSER_ROLE
      */
-    function unpause() public onlyRole(PAUSER_ROLE) {
+    function unpause() external onlyRole(PAUSER_ROLE) {
         _unpause();
     }
-    
+
     /**
      * @dev Mints new tokens
-     * Requirements:
-     * - caller must have MINTER_ROLE
-     * - total supply must not exceed MAX_SUPPLY
+     * @param to The address to receive the minted tokens
+     * @param amount The amount of tokens to mint
+     * Requirements: Caller must have MINTER_ROLE
      */
-    function mint(address to, uint256 amount) public onlyRole(MINTER_ROLE) {
-        require(totalSupply() + amount <= MAX_SUPPLY, "Exceeds maximum supply");
-        _mint(to, amount);
-    }
-    
-    /**
-     * @dev Locks tokens for a specified period
-     * @param amount Amount of tokens to lock
-     * @param unlockTime Time when tokens will be unlocked
-     */
-    function lockTokens(uint256 amount, uint256 unlockTime) external nonReentrant {
-        require(amount > 0, "Amount must be greater than 0");
-        require(unlockTime > block.timestamp, "Unlock time must be in future");
-        require(balanceOf(msg.sender) >= amount + _lockedTokens[msg.sender], 
-                "Insufficient unlocked balance");
-        
-        _lockedTokens[msg.sender] += amount;
-        _lockEndTime[msg.sender] = unlockTime;
-        
-        emit TokensLocked(msg.sender, amount, unlockTime);
-    }
-    
-    /**
-     * @dev Unlocks tokens after lock period
-     */
-    function unlockTokens() external nonReentrant {
-        require(_lockedTokens[msg.sender] > 0, "No locked tokens");
-        require(block.timestamp >= _lockEndTime[msg.sender], "Tokens are still locked");
-        
-        uint256 amount = _lockedTokens[msg.sender];
-        _lockedTokens[msg.sender] = 0;
-        _lockEndTime[msg.sender] = 0;
-        
-        emit TokensUnlocked(msg.sender, amount);
-    }
-    
-    /**
-     * @dev Returns the amount of locked tokens for an account
-     */
-    function getLockedTokens(address account) external view returns (uint256) {
-        return _lockedTokens[account];
-    }
-    
-    /**
-     * @dev Hook that is called before any transfer of tokens
-     */
-    function _beforeTokenTransfer(
-        address from,
+    function mint(
         address to,
         uint256 amount
+    ) external onlyRole(MINTER_ROLE) nonReentrant {
+        require(to != address(0), "Invalid recipient");
+        require(amount > 0, "Amount must be positive");
+        _mint(to, amount);
+    }
+
+    /**
+     * @dev Burns tokens from an address
+     * @param amount The amount of tokens to burn
+     * Requirements: Caller must have BURNER_ROLE
+     */
+    function burn(uint256 amount) external onlyRole(BURNER_ROLE) nonReentrant {
+        require(amount > 0, "Amount must be positive");
+        _burn(_msgSender(), amount);
+        emit TokensBurned(_msgSender(), amount);
+    }
+
+    /**
+     * @dev Updates the maximum transfer amount
+     * @param newAmount The new maximum transfer amount
+     * Requirements: Caller must have DEFAULT_ADMIN_ROLE
+     */
+    function updateMaxTransferAmount(
+        uint256 newAmount
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newAmount > 0, "Invalid amount");
+        maxTransferAmount = newAmount;
+        emit MaxTransferAmountUpdated(newAmount);
+    }
+
+    /**
+     * @dev Blacklists or unblacklists an address
+     * @param account The address to blacklist/unblacklist
+     * @param status True to blacklist, false to unblacklist
+     * Requirements: Caller must have DEFAULT_ADMIN_ROLE
+     */
+    function setBlacklist(
+        address account,
+        bool status
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(account != address(0), "Invalid address");
+        isBlacklisted[account] = status;
+        emit AddressBlacklisted(account, status);
+    }
+
+    /**
+     * @dev Override of the transfer function to add security checks
+     */
+    function _transfer(
+        address sender,
+        address recipient,
+        uint256 amount
     ) internal virtual override whenNotPaused {
-        if (from != address(0)) { // Exclude minting
-            require(balanceOf(from) - _lockedTokens[from] >= amount, 
-                    "Transfer amount exceeds unlocked balance");
-        }
-        super._beforeTokenTransfer(from, to, amount);
+        require(!isBlacklisted[sender], "Sender blacklisted");
+        require(!isBlacklisted[recipient], "Recipient blacklisted");
+        require(amount <= maxTransferAmount, "Transfer amount exceeds limit");
+        super._transfer(sender, recipient, amount);
+    }
+
+    /**
+     * @dev Override required by Solidity
+     */
+    function supportsInterface(
+        bytes4 interfaceId
+    ) public view override(AccessControl) returns (bool) {
+        return super.supportsInterface(interfaceId);
     }
 }
 ```
 
-Key Design Decisions and Features:
+Key design decisions and security considerations:
 
-1. **Security Features**:
-- Using OpenZeppelin's battle-tested contracts as base
-- Implementation of AccessControl for role-based permissions
-- ReentrancyGuard to prevent reentrancy attacks
+1. **Access Control**:
+- Implemented role-based access using OpenZeppelin's AccessControl
+- Separate roles for minting, burning, and pausing functionality
+- Admin role for managing critical parameters
+
+2. **Security Features**:
+- ReentrancyGuard for mint/burn operations
 - Pausable functionality for emergency situations
-- Careful validation of all inputs
+- Blacklist capability for suspicious addresses
+- Anti-whale mechanism with maxTransferAmount
 
-2. **Token Economics**:
-- Initial supply: 1 billion tokens
-- Maximum supply: 2 billion tokens
-- Decimals: 18 (standard for ERC-20)
-
-3. **Enhanced Functionality**:
-- Token locking mechanism for vesting/staking
-- Burning capability
-- Minting with maximum supply control
-- Role-based access control
-
-4. **Gas Optimization**:
+3. **Gas Optimization**:
 - Efficient use of storage variables
-- Minimal use of loops
-- Optimized require statements
-- Use of immutable variables where possible
+- Minimal state changes
+- Optimized function modifiers
 
-5. **Error Handling**:
-- Comprehensive require statements with clear error messages
-- Proper validation of all inputs
-- Check-Effects-Interaction pattern followed
+4. **Error Handling**:
+- Comprehensive require statements
+- Clear error messages
+- Event emissions for important state changes
+
+5. **Future-Proofing**:
+- Modular design for potential upgrades
+- Extensible role system
+- Well-documented code for maintenance
 
 To deploy this contract:
+1. Install OpenZeppelin dependencies
+2. Deploy with initial supply and admin address parameters
+3. Set up additional roles as needed
+4. Configure maxTransferAmount based on tokenomics
 
-1. Install dependencies:
-```bash
-npm install @openzeppelin/contracts
-```
+This implementation provides a secure and flexible foundation for the ClaudeChain ecosystem while maintaining gas efficiency and following best practices.
 
-2. Compile with Hardhat or Truffle:
-```bash
-npx hardhat compile
-```
-
-3. Deploy with constructor parameters:
-```javascript
-const ClaudeToken = await ethers.getContractFactory("ClaudeToken");
-const claudeToken = await ClaudeToken.deploy();
-await claudeToken.deployed();
-```
-
-Testing Considerations:
-1. Test all role-based functions
-2. Verify token locking/unlocking mechanics
-3. Test maximum supply limitations
-4. Verify pause/unpause functionality
-5. Test transfer restrictions with locked tokens
-
-Would you like me to provide the test suite or elaborate on any particular aspect of the implementation?
+Would you like me to explain any specific part in more detail or discuss additional features?
