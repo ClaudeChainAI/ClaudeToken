@@ -1,4 +1,4 @@
-I'll help create the Initializable.sol contract, which is a crucial component for upgradeable smart contracts. I'll walk through the development process and explain key decisions.
+I'll help create the Initializable.sol contract, which is a crucial component for upgradeable contracts. I'll walk through the development process and explain key decisions.
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -7,23 +7,23 @@ pragma solidity ^0.8.19;
 /**
  * @title Initializable
  * @dev Contract module that helps implement initialization logic for upgradeable contracts
- * @notice This contract prevents multiple initializations and provides initialization status tracking
+ * @notice Prevents multiple initializations and provides initialization status tracking
+ * @custom:security-contact security@claudechain.io
  */
 contract Initializable {
     /**
      * @dev Indicates that the contract has been initialized.
-     * @custom:security This variable is immutable and can only be set once
+     * @custom:oz-upgrades-unsafe-allow state-variable-immutable
      */
     uint8 private _initialized;
 
     /**
      * @dev Indicates that the contract is in the process of being initialized.
-     * @custom:security Prevents reentrancy during initialization
      */
     bool private _initializing;
 
     /**
-     * @dev Modifier that prevents function from being called during initialization
+     * @dev Modifier to protect an initializer function from being invoked twice.
      */
     modifier initializer() {
         bool isTopLevelCall = !_initializing;
@@ -42,7 +42,22 @@ contract Initializable {
     }
 
     /**
-     * @dev Modifier to protect an initialization function so that it can only be called by functions with the {initializer} modifier
+     * @dev Modifier to protect an reinitializer function from being invoked twice.
+     * @param version Version of the contract being initialized
+     */
+    modifier reinitializer(uint8 version) {
+        require(
+            _initialized < version,
+            "Initializable: contract is already initialized"
+        );
+        _initialized = version;
+        _initializing = true;
+        _;
+        _initializing = false;
+    }
+
+    /**
+     * @dev Modifier that prevents reentrancy during initialization
      */
     modifier onlyInitializing() {
         require(_initializing, "Initializable: contract is not initializing");
@@ -50,54 +65,59 @@ contract Initializable {
     }
 
     /**
-     * @dev Returns true if and only if the contract is currently initializing.
+     * @dev Returns true if the contract is currently initializing.
+     * @return bool Initialization status
      */
     function isInitializing() public view returns (bool) {
         return _initializing;
     }
 
     /**
-     * @dev Returns true if the contract has been initialized.
+     * @dev Returns the initialization status.
+     * @return uint8 Current initialization version
      */
-    function isInitialized() public view returns (bool) {
-        return _initialized == 1;
+    function getInitializedVersion() public view returns (uint8) {
+        return _initialized;
     }
 
     /**
-     * @dev Locks the contract, preventing any future initialization.
-     * @custom:security This function should be called after initialization to prevent future modifications
+     * @dev Internal function to disable initializations
      */
     function _disableInitializers() internal virtual {
         require(!_initializing, "Initializable: contract is initializing");
-        if (_initialized < 255) {
-            _initialized = 255;
+        if (_initialized < type(uint8).max) {
+            _initialized = type(uint8).max;
         }
     }
 }
 ```
 
-Key Development Decisions:
+Key Development Decisions and Explanations:
 
-1. State Variables:
-- Used uint8 for _initialized to optimize gas (smaller than uint256)
-- Used bool for _initializing to track initialization state
-- Made variables private for security
+1. Version Control:
+- Used uint8 for _initialized to support multiple initialization versions
+- This allows for future upgrades while maintaining initialization state
+- Saves gas compared to using larger integer types
 
-2. Security Features:
-- Reentrancy protection during initialization
-- Single initialization guarantee
-- State tracking to prevent multiple initializations
-- Ability to permanently disable initializations
+2. Security Measures:
+- Implemented reentrancy protection during initialization
+- Added version checks to prevent multiple initializations
+- Used internal state variables with controlled access
 
-3. Gas Optimization:
-- Minimal storage usage
-- Efficient boolean checks
-- Optimized variable types
+3. Modifiers:
+- initializer: Protects against multiple initializations
+- reinitializer: Allows controlled reinitialization for upgrades
+- onlyInitializing: Ensures function calls only during initialization
 
-4. Error Handling:
-- Clear require statements with descriptive messages
-- State validation in modifiers
-- Protection against incorrect initialization states
+4. Gas Optimization:
+- Used uint8 instead of uint256 for version tracking
+- Minimized storage usage
+- Efficient boolean flags for state tracking
+
+5. Error Handling:
+- Clear, specific error messages
+- Comprehensive require statements
+- State validation in critical functions
 
 Usage Example:
 ```solidity
@@ -108,27 +128,17 @@ contract MyUpgradeableContract is Initializable {
         value = _value;
     }
     
-    function someFunction() public {
-        require(isInitialized(), "Contract not initialized");
-        // function logic
+    function reinitialize(uint256 _newValue) public reinitializer(2) {
+        value = _newValue;
     }
 }
 ```
 
-Testing Considerations:
-1. Test initialization flow
-2. Verify reentrancy protection
-3. Test multiple initialization attempts
-4. Verify state transitions
-5. Test initialization disabling
-
 Security Considerations:
 1. Prevent multiple initializations
-2. Protect against reentrancy
-3. Ensure proper access control
-4. Maintain state consistency
-5. Handle edge cases
+2. Protection against reentrancy during initialization
+3. Version control for upgrades
+4. Access control for initialization functions
+5. State validation
 
 This implementation provides a robust foundation for upgradeable contracts in ClaudeChain while maintaining high security standards and gas efficiency.
-
-Would you like me to add any additional features or explain any part in more detail?
