@@ -1,192 +1,187 @@
-I'll help create a secure and optimized ProxyAdmin contract for ClaudeChain. This contract will manage proxy upgrades and administrative functions with proper access control and security measures.
+I'll help create a secure and well-structured ProxyAdmin contract for ClaudeChain. This contract will manage proxy upgrades while implementing crucial security measures.
 
-Here's the implementation:
+Here's the production-ready code with detailed explanations:
 
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title ProxyAdmin
- * @dev Contract for managing proxy upgrades and administrative functions on ClaudeChain
- * @notice Handles upgrade management for transparent proxies with robust access control
+ * @dev Contract for managing proxy upgrades in ClaudeChain
+ * @notice Handles administrative functions for TransparentUpgradeableProxy contracts
+ * @author ClaudeChain Team
  */
-contract ProxyAdmin is AccessControl, Pausable, ReentrancyGuard {
-    // Role definitions
-    bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
-    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
-
+contract ProxyAdmin is Ownable, Pausable, ReentrancyGuard {
     // Events
     event ProxyUpgraded(address indexed proxy, address indexed implementation);
-    event ImplementationReverted(address indexed proxy, address indexed oldImplementation);
     event AdminChanged(address indexed proxy, address indexed newAdmin);
-
+    event EmergencyShutdown(address indexed triggeredBy);
+    
+    // Custom errors
+    error InvalidProxyAddress();
+    error InvalidImplementationAddress();
+    error UpgradeFailed();
+    error AdminChangeFailed();
+    error ZeroAddress();
+    
     // State variables
-    mapping(address => address[]) private proxyImplementationHistory;
-    mapping(address => bool) public registeredProxies;
-
+    mapping(address => bool) public authorizedProxies;
+    uint256 public lastUpgradeTimestamp;
+    uint256 public constant UPGRADE_TIMELOCK = 24 hours;
+    
     /**
-     * @dev Constructor to set up initial roles
-     * @param initialAdmin Address of the initial admin
+     * @dev Constructor
+     * @notice Initializes the contract with the deployer as owner
      */
-    constructor(address initialAdmin) {
-        require(initialAdmin != address(0), "Invalid admin address");
-        
-        _setupRole(DEFAULT_ADMIN_ROLE, initialAdmin);
-        _setupRole(UPGRADER_ROLE, initialAdmin);
-        _setupRole(PAUSER_ROLE, initialAdmin);
+    constructor() Ownable(msg.sender) {
+        lastUpgradeTimestamp = block.timestamp;
     }
-
+    
     /**
-     * @dev Upgrades a proxy to a new implementation
+     * @dev Authorizes a proxy contract for management
+     * @param proxy Address of the proxy to authorize
+     */
+    function authorizeProxy(address proxy) external onlyOwner {
+        if (proxy == address(0)) revert ZeroAddress();
+        authorizedProxies[proxy] = true;
+    }
+    
+    /**
+     * @dev Upgrades the implementation of a proxy contract
      * @param proxy Address of the proxy to upgrade
-     * @param implementation Address of the new implementation
+     * @param implementation New implementation address
      */
-    function upgrade(address proxy, address implementation) 
+    function upgradeProxy(address proxy, address implementation) 
         external 
-        onlyRole(UPGRADER_ROLE) 
+        onlyOwner 
         whenNotPaused 
         nonReentrant 
     {
-        require(proxy != address(0), "Invalid proxy address");
-        require(implementation != address(0), "Invalid implementation address");
-        require(registeredProxies[proxy], "Proxy not registered");
+        // Validation
+        if (!authorizedProxies[proxy]) revert InvalidProxyAddress();
+        if (implementation == address(0)) revert InvalidImplementationAddress();
+        if (block.timestamp < lastUpgradeTimestamp + UPGRADE_TIMELOCK) 
+            revert("Timelock period not elapsed");
 
-        // Verify the new implementation contains valid code
-        require(implementation.code.length > 0, "Implementation must contain code");
-
-        // Store the current implementation in history
-        address currentImpl = TransparentUpgradeableProxy(payable(proxy)).implementation();
-        proxyImplementationHistory[proxy].push(currentImpl);
-
-        // Perform the upgrade
-        TransparentUpgradeableProxy(payable(proxy)).upgradeTo(implementation);
-
-        emit ProxyUpgraded(proxy, implementation);
+        // Perform upgrade
+        try TransparentUpgradeableProxy(payable(proxy)).upgradeTo(implementation) {
+            lastUpgradeTimestamp = block.timestamp;
+            emit ProxyUpgraded(proxy, implementation);
+        } catch {
+            revert UpgradeFailed();
+        }
     }
-
+    
     /**
-     * @dev Registers a new proxy for management
-     * @param proxy Address of the proxy to register
-     */
-    function registerProxy(address proxy) 
-        external 
-        onlyRole(DEFAULT_ADMIN_ROLE) 
-        whenNotPaused 
-    {
-        require(proxy != address(0), "Invalid proxy address");
-        require(!registeredProxies[proxy], "Proxy already registered");
-
-        registeredProxies[proxy] = true;
-        
-        // Store initial implementation
-        address currentImpl = TransparentUpgradeableProxy(payable(proxy)).implementation();
-        proxyImplementationHistory[proxy].push(currentImpl);
-    }
-
-    /**
-     * @dev Reverts a proxy to its previous implementation
-     * @param proxy Address of the proxy to revert
-     */
-    function revertToLastImplementation(address proxy) 
-        external 
-        onlyRole(UPGRADER_ROLE) 
-        whenNotPaused 
-        nonReentrant 
-    {
-        require(registeredProxies[proxy], "Proxy not registered");
-        require(proxyImplementationHistory[proxy].length > 1, "No previous implementation");
-
-        uint256 lastIndex = proxyImplementationHistory[proxy].length - 1;
-        address previousImpl = proxyImplementationHistory[proxy][lastIndex - 1];
-
-        // Perform the downgrade
-        TransparentUpgradeableProxy(payable(proxy)).upgradeTo(previousImpl);
-
-        // Remove the current implementation from history
-        proxyImplementationHistory[proxy].pop();
-
-        emit ImplementationReverted(proxy, previousImpl);
-    }
-
-    /**
-     * @dev Returns the implementation history for a proxy
+     * @dev Changes the admin of a proxy contract
      * @param proxy Address of the proxy
+     * @param newAdmin Address of the new admin
      */
-    function getImplementationHistory(address proxy) 
+    function changeProxyAdmin(address proxy, address newAdmin) 
+        external 
+        onlyOwner 
+        whenNotPaused 
+        nonReentrant 
+    {
+        if (!authorizedProxies[proxy]) revert InvalidProxyAddress();
+        if (newAdmin == address(0)) revert ZeroAddress();
+        
+        try TransparentUpgradeableProxy(payable(proxy)).changeAdmin(newAdmin) {
+            emit AdminChanged(proxy, newAdmin);
+        } catch {
+            revert AdminChangeFailed();
+        }
+    }
+    
+    /**
+     * @dev Gets the current implementation address of a proxy
+     * @param proxy Address of the proxy
+     * @return implementation Current implementation address
+     */
+    function getProxyImplementation(address proxy) 
         external 
         view 
-        returns (address[] memory) 
+        returns (address implementation) 
     {
-        require(registeredProxies[proxy], "Proxy not registered");
-        return proxyImplementationHistory[proxy];
+        if (!authorizedProxies[proxy]) revert InvalidProxyAddress();
+        
+        implementation = TransparentUpgradeableProxy(payable(proxy)).implementation();
     }
-
+    
     /**
-     * @dev Pauses all upgrade operations
+     * @dev Emergency pause for all upgrade operations
      */
-    function pause() external onlyRole(PAUSER_ROLE) {
+    function emergencyShutdown() external onlyOwner {
         _pause();
+        emit EmergencyShutdown(msg.sender);
     }
-
+    
     /**
-     * @dev Unpauses all upgrade operations
+     * @dev Resumes operations after emergency shutdown
      */
-    function unpause() external onlyRole(PAUSER_ROLE) {
+    function resumeOperations() external onlyOwner {
         _unpause();
-    }
-
-    /**
-     * @dev Prevents renouncing ownership by overriding the default behavior
-     */
-    function renounceRole(bytes32, address) public pure override {
-        revert("Role renouncement is disabled");
     }
 }
 ```
 
-Key Design Decisions and Security Measures:
+Key Design Decisions and Security Features:
 
 1. Access Control:
-- Implemented OpenZeppelin's AccessControl for role-based permissions
-- Separate roles for upgrading (UPGRADER_ROLE) and pausing (PAUSER_ROLE)
-- Disabled role renouncement for security
+- Inherits OpenZeppelin's Ownable for basic access control
+- Only authorized addresses can manage proxy contracts
+- Owner-only functions for critical operations
 
-2. Security Features:
+2. Security Measures:
 - ReentrancyGuard to prevent reentrancy attacks
-- Pausable functionality for emergency stops
-- Implementation history tracking for auditability
-- Ability to revert to previous implementations
-- Checks for valid addresses and contract code
+- Pausable functionality for emergency situations
+- Timelock mechanism for upgrades (24-hour delay)
+- Zero-address checks
+- Try-catch blocks for external calls
 
 3. Gas Optimization:
-- Efficient storage usage with minimal state variables
-- Used mapping for proxy registration instead of array
-- Implemented view functions for reading state
+- Custom errors instead of require statements
+- Efficient state variable usage
+- Minimal storage operations
 
-4. Error Handling:
-- Comprehensive require statements with clear error messages
-- Event emissions for important state changes
-- Validation of all input parameters
+4. Additional Features:
+- Emergency shutdown capability
+- Proxy authorization system
+- Event emission for important actions
+- Implementation address getter
 
-5. Additional Features:
-- Implementation history tracking
-- Proxy registration system
-- Revert to previous implementation functionality
-- View functions for transparency
+5. Error Handling:
+- Custom error definitions for specific failure cases
+- Comprehensive input validation
+- Graceful handling of failed external calls
 
-To use this contract:
+To deploy this contract:
 
-1. Deploy with an initial admin address
-2. Register proxies using registerProxy()
-3. Use upgrade() to perform upgrades
-4. Monitor changes through events
-5. Use revertToLastImplementation() if needed
-6. View implementation history using getImplementationHistory()
+1. Install dependencies:
+```bash
+npm install @openzeppelin/contracts
+```
 
-This implementation provides a secure and flexible way to manage proxy upgrades while maintaining proper access control and security measures.
+2. Deployment script example:
+```javascript
+const ProxyAdmin = await ethers.getContractFactory("ProxyAdmin");
+const proxyAdmin = await ProxyAdmin.deploy();
+await proxyAdmin.deployed();
+```
+
+3. Post-deployment verification:
+```javascript
+// Authorize a proxy
+await proxyAdmin.authorizeProxy(proxyAddress);
+
+// Upgrade a proxy
+await proxyAdmin.upgradeProxy(proxyAddress, newImplementationAddress);
+```
+
+This implementation provides a secure and flexible way to manage proxy contracts in ClaudeChain while maintaining high security standards and following best practices.
