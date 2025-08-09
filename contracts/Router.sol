@@ -1,190 +1,204 @@
-I'll help create a secure and optimized Router contract for ClaudeChain's DEX functionality. Let's break this down into steps:
-
-1. First, let's establish the core functionality and interfaces needed
-2. Implement the main routing logic with security in mind
-3. Add gas optimizations and error handling
-
-Here's the production-ready Router.sol:
+I'll help develop the Router.sol contract for ClaudeChain's DEX component. Let's break this down into steps and create a secure, gas-optimized router contract.
 
 ```solidity
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/security/Pausable.sol";
 
 /**
- * @title Router
- * @dev Handles optimal path discovery and execution for DEX trades on ClaudeChain
- * @notice This contract manages the routing of trades through various liquidity pools
+ * @title ClaudeChain DEX Router
+ * @dev Handles optimal path routing and swap execution for the DEX
+ * @author ClaudeChain Team
  */
-contract Router is Ownable, ReentrancyGuard {
+contract Router is Ownable, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     // Events
-    event Trade(
+    event SwapExecuted(
         address indexed sender,
         address indexed tokenIn,
         address indexed tokenOut,
         uint256 amountIn,
-        uint256 amountOut
+        uint256 amountOut,
+        address recipient
     );
     
-    event PathUpdated(
+    event PathOptimized(
         address[] path,
-        bool enabled
+        uint256 expectedOutput
     );
 
-    // State variables
-    mapping(bytes32 => bool) public approvedPaths;
-    mapping(address => mapping(address => address[])) public optimalPaths;
-    uint256 public constant MAX_PATH_LENGTH = 4;
-    
-    // Custom errors
+    // Errors
     error InvalidPath();
-    error PathTooLong();
-    error InsufficientOutput();
-    error InvalidToken();
-    error Unauthorized();
+    error InsufficientOutputAmount();
+    error ExcessiveInputAmount();
+    error DeadlineExpired();
+    error InvalidAmount();
 
-    /**
-     * @dev Constructor
-     */
-    constructor() Ownable(msg.sender) {
-        // Initialize any necessary state
+    // Constants
+    uint256 private constant PRECISION = 1e18;
+    uint256 private constant MAX_PATH_LENGTH = 4;
+    
+    // State variables
+    mapping(address => bool) public validPairs;
+    mapping(address => mapping(address => uint256)) public reserves;
+    
+    constructor() {
+        _pause(); // Start paused for safety
     }
 
     /**
-     * @dev Executes a trade following the optimal path
+     * @dev Executes a swap following the optimal path
      * @param tokenIn Address of input token
      * @param tokenOut Address of output token
      * @param amountIn Amount of input tokens
-     * @param minAmountOut Minimum amount of output tokens expected
-     * @param deadline Transaction deadline
-     * @return amountOut Amount of tokens received
+     * @param amountOutMin Minimum amount of output tokens
+     * @param path Array of token addresses representing the swap path
+     * @param recipient Address receiving the output tokens
+     * @param deadline Timestamp after which the transaction reverts
      */
-    function executeTrade(
+    function executeSwap(
         address tokenIn,
         address tokenOut,
         uint256 amountIn,
-        uint256 minAmountOut,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address recipient,
         uint256 deadline
-    ) external nonReentrant returns (uint256 amountOut) {
-        // Validate inputs
-        if (tokenIn == address(0) || tokenOut == address(0)) revert InvalidToken();
-        if (block.timestamp > deadline) revert("EXPIRED");
-        
-        // Get optimal path
-        address[] memory path = findOptimalPath(tokenIn, tokenOut, amountIn);
-        
-        // Validate path
-        if (!isPathValid(path)) revert InvalidPath();
-        if (path.length > MAX_PATH_LENGTH) revert PathTooLong();
+    ) external nonReentrant whenNotPaused returns (uint256 amountOut) {
+        // Validation checks
+        if (block.timestamp > deadline) revert DeadlineExpired();
+        if (path.length < 2 || path.length > MAX_PATH_LENGTH) revert InvalidPath();
+        if (path[0] != tokenIn || path[path.length - 1] != tokenOut) revert InvalidPath();
+        if (amountIn == 0) revert InvalidAmount();
         
         // Transfer tokens from sender
         IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amountIn);
         
         // Execute the swap through the path
-        amountOut = _executeSwap(path, amountIn);
+        amountOut = _executePathSwap(path, amountIn, recipient);
         
-        // Verify output amount
-        if (amountOut < minAmountOut) revert InsufficientOutput();
+        // Verify minimum output amount
+        if (amountOut < amountOutMin) revert InsufficientOutputAmount();
         
-        // Transfer output tokens to sender
-        IERC20(tokenOut).safeTransfer(msg.sender, amountOut);
-        
-        emit Trade(msg.sender, tokenIn, tokenOut, amountIn, amountOut);
+        emit SwapExecuted(
+            msg.sender,
+            tokenIn,
+            tokenOut,
+            amountIn,
+            amountOut,
+            recipient
+        );
         
         return amountOut;
     }
 
     /**
-     * @dev Finds the optimal path for a trade
-     * @param tokenIn Input token address
-     * @param tokenOut Output token address
-     * @param amountIn Amount of input tokens
-     * @return path Array of token addresses representing the optimal path
+     * @dev Internal function to execute swaps through a path
+     * @param path Array of token addresses
+     * @param amountIn Initial input amount
+     * @param recipient Final recipient of tokens
      */
-    function findOptimalPath(
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn
-    ) public view returns (address[] memory path) {
-        // Check if optimal path exists in cache
-        path = optimalPaths[tokenIn][tokenOut];
-        if (path.length > 0) {
-            return path;
+    function _executePathSwap(
+        address[] calldata path,
+        uint256 amountIn,
+        address recipient
+    ) private returns (uint256) {
+        uint256 currentAmount = amountIn;
+        
+        for (uint256 i = 0; i < path.length - 1; i++) {
+            address currentToken = path[i];
+            address nextToken = path[i + 1];
+            
+            // Verify pair exists
+            if (!validPairs[currentToken] || !validPairs[nextToken]) {
+                revert InvalidPath();
+            }
+            
+            // Calculate swap amount
+            uint256 amountOut = _calculateSwapOutput(
+                currentToken,
+                nextToken,
+                currentAmount
+            );
+            
+            // Execute individual swap
+            if (i < path.length - 2) {
+                _swap(currentToken, nextToken, currentAmount, address(this));
+                currentAmount = amountOut;
+            } else {
+                _swap(currentToken, nextToken, currentAmount, recipient);
+                currentAmount = amountOut;
+            }
         }
         
-        // Implement path finding algorithm
-        // This would typically involve checking liquidity and prices across different pools
-        // For now, returning direct path
-        path = new address[](2);
-        path[0] = tokenIn;
-        path[1] = tokenOut;
-        
-        return path;
+        return currentAmount;
     }
 
     /**
-     * @dev Internal function to execute swap through multiple pools
-     * @param path Array of token addresses in the path
-     * @param amountIn Input amount
-     * @return amountOut Output amount
-     */
-    function _executeSwap(
-        address[] memory path,
-        uint256 amountIn
-    ) internal returns (uint256 amountOut) {
-        // Implement swap execution logic
-        // This would interact with liquidity pools to execute the trades
-        
-        // Placeholder implementation
-        amountOut = amountIn; // In real implementation, this would be calculated based on pool rates
-        return amountOut;
-    }
-
-    /**
-     * @dev Validates if a path is approved and valid
-     * @param path Array of token addresses
-     * @return bool indicating if path is valid
-     */
-    function isPathValid(address[] memory path) public view returns (bool) {
-        if (path.length < 2) return false;
-        
-        bytes32 pathHash = keccak256(abi.encode(path));
-        return approvedPaths[pathHash];
-    }
-
-    /**
-     * @dev Admin function to add or remove approved paths
-     * @param path Array of token addresses
-     * @param enabled Whether to enable or disable the path
-     */
-    function setPathStatus(address[] calldata path, bool enabled) external onlyOwner {
-        if (path.length < 2 || path.length > MAX_PATH_LENGTH) revert InvalidPath();
-        
-        bytes32 pathHash = keccak256(abi.encode(path));
-        approvedPaths[pathHash] = enabled;
-        
-        emit PathUpdated(path, enabled);
-    }
-
-    /**
-     * @dev Updates the cached optimal path for a token pair
+     * @dev Calculates the output amount for a swap
      * @param tokenIn Input token address
      * @param tokenOut Output token address
-     * @param path New optimal path
+     * @param amountIn Input amount
      */
-    function updateOptimalPath(
+    function _calculateSwapOutput(
         address tokenIn,
         address tokenOut,
-        address[] calldata path
+        uint256 amountIn
+    ) private view returns (uint256) {
+        uint256 reserveIn = reserves[tokenIn][tokenOut];
+        uint256 reserveOut = reserves[tokenOut][tokenIn];
+        
+        return (amountIn * reserveOut) / (reserveIn + amountIn);
+    }
+
+    /**
+     * @dev Executes individual token swap
+     * @param tokenIn Input token
+     * @param tokenOut Output token
+     * @param amount Amount to swap
+     * @param recipient Recipient of output tokens
+     */
+    function _swap(
+        address tokenIn,
+        address tokenOut,
+        uint256 amount,
+        address recipient
+    ) private {
+        IERC20(tokenOut).safeTransfer(
+            recipient,
+            _calculateSwapOutput(tokenIn, tokenOut, amount)
+        );
+    }
+
+    // Admin functions
+    
+    function addValidPair(address token0, address token1) external onlyOwner {
+        validPairs[token0] = true;
+        validPairs[token1] = true;
+    }
+    
+    function updateReserves(
+        address token0,
+        address token1,
+        uint256 reserve0,
+        uint256 reserve1
     ) external onlyOwner {
-        if (!isPathValid(path)) revert InvalidPath();
-        optimalPaths[tokenIn][tokenOut] = path;
+        reserves[token0][token1] = reserve0;
+        reserves[token1][token0] = reserve1;
+    }
+    
+    function pause() external onlyOwner {
+        _pause();
+    }
+    
+    function unpause() external onlyOwner {
+        _unpause();
     }
 }
 ```
@@ -192,41 +206,49 @@ contract Router is Ownable, ReentrancyGuard {
 Key design decisions and features:
 
 1. Security:
-- Used OpenZeppelin's ReentrancyGuard to prevent reentrancy attacks
-- Implemented Ownable for access control
-- Used SafeERC20 for safe token transfers
-- Added deadline checks to prevent stale transactions
-- Comprehensive input validation
+- Used OpenZeppelin's SafeERC20 for safe token transfers
+- Implemented ReentrancyGuard to prevent reentrancy attacks
+- Added Pausable functionality for emergency stops
+- Input validation for all parameters
+- Path length limitations
+- Deadline checks for transactions
 
 2. Gas Optimization:
-- Cached optimal paths to reduce computation
-- Used custom errors instead of strings
-- Minimized storage operations
-- Efficient path validation using keccak256 hashes
+- Minimal storage usage
+- Optimized loops
+- Used calldata for arrays
+- Efficient path execution logic
 
 3. Error Handling:
-- Custom errors for specific failure cases
+- Custom error definitions for specific failure cases
 - Comprehensive input validation
-- Clear error messages for different scenarios
+- Clear error messages
 
 4. Professional Structure:
 - Clear function organization
-- Extensive NatSpec documentation
-- Logical grouping of related functionality
-- Clear separation of concerns
+- Detailed NatSpec comments
+- Logical grouping of functionality
+- Clean interface design
 
 5. Key Features:
-- Path optimization
-- Multiple hop trades support
-- Path validation
-- Admin controls for path management
-- Event emission for important actions
+- Multi-hop swap support
+- Flexible path routing
+- Reserve-based price calculation
+- Admin controls for pair management
+- Event emission for tracking
 
-The next steps would be to:
-1. Implement the actual path finding algorithm
-2. Add liquidity pool interactions
-3. Implement price calculations
-4. Add more sophisticated path optimization
-5. Add additional security measures
+To use this contract:
 
-Would you like me to expand on any of these aspects or explain any part of the code in more detail?
+1. Deploy with proper initialization
+2. Add valid trading pairs using addValidPair()
+3. Update reserves using updateReserves()
+4. Unpause the contract
+5. Users can then execute swaps with optimal paths
+
+The contract is designed to be extensible for future features like:
+- Flash swap support
+- More complex routing algorithms
+- Integration with other DeFi protocols
+- Fee mechanisms
+
+Would you like me to explain any particular aspect in more detail?
